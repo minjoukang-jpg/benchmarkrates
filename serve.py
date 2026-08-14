@@ -144,22 +144,9 @@ def get_curve_shape(conn, curve, date):
     return {"date": actual, "points": points}
 
 
-def export_csv(conn, curve, start, end):
-    """Wide format - one row per date, one column per tenor. Paste-ready."""
-    rows = conn.execute(
-        "SELECT rate_date, tenor, rate FROM rates WHERE curve=? "
-        "AND rate_date BETWEEN ? AND ? ORDER BY rate_date DESC", (curve, start, end)).fetchall()
-    tenors = sorted({r["tenor"] for r in rows}, key=db.tenor_sort_key)
-    table = {}
-    for r in rows:
-        table.setdefault(r["rate_date"], {})[r["tenor"]] = r["rate"]
-
-    buf = io.StringIO()
-    w = csv.writer(buf, lineterminator="\n")
-    w.writerow(["Date"] + tenors)
-    for date in sorted(table, reverse=True):
-        w.writerow([date] + [table[date].get(t, "") for t in tenors])
-    return buf.getvalue()
+# The CSV writer lives in db.py so that the web download, the committed seed
+# files and the command-line export are all byte-identical by construction.
+export_csv = db.export_csv
 
 
 # --------------------------------------------------------------------------

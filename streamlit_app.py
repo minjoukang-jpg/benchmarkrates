@@ -16,6 +16,7 @@ byte-for-byte.
 import contextlib
 import datetime
 import os
+import tempfile
 
 import altair as alt
 import pandas as pd
@@ -48,6 +49,34 @@ st.set_page_config(page_title="Benchmark Rates", page_icon="chart_with_upwards_t
 # Data
 # --------------------------------------------------------------------------
 
+@st.cache_resource
+def database_path():
+    """Path to a readable database, built from the committed CSVs when hosted.
+
+    The repository carries the data as CSV under data/, not as rates.db: text
+    survives git and browser uploads intact, is a fraction of the size, and can
+    be diffed. A 9 MB SQLite binary pushed through a web uploader arrives
+    corrupted, which is exactly what happened before this changed.
+
+    Note this caches the file PATH, a plain string, and never a connection. A
+    cached connection breaks as soon as Streamlit reruns the script on another
+    thread.
+    """
+    if os.path.exists(DB_PATH):
+        return DB_PATH                     # local development: use the live database
+    if not db.csv_files_present():
+        return None
+
+    build = os.path.join(tempfile.gettempdir(), "rates_from_csv.db")
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(build + suffix):
+            os.remove(build + suffix)
+    conn = db.init(build)
+    db.read_csv_files(conn)
+    conn.close()
+    return build
+
+
 @contextlib.contextmanager
 def _conn():
     """A connection scoped to a single query.
@@ -58,7 +87,7 @@ def _conn():
     ProgrammingError the moment anyone touches a control. Connections are cheap
     and the results are cached below, so the database is barely touched.
     """
-    conn = db.connect_readonly(DB_PATH)
+    conn = db.connect_readonly(database_path())
     try:
         yield conn
     finally:
@@ -111,9 +140,11 @@ def nice_date(iso):
 # Page
 # --------------------------------------------------------------------------
 
-if not os.path.exists(DB_PATH):
-    st.error("rates.db is missing from this deployment. The daily workflow "
-             "commits it to the repository; check that it ran.")
+if database_path() is None:
+    st.error(
+        "No rate data found in this deployment. The repository should contain "
+        "`data/BVAL.csv`, `data/KLIBOR.csv` and so on, which the daily workflow "
+        "keeps up to date. Check that the `data/` folder was committed.")
     st.stop()
 
 meta = load_meta()

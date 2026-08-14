@@ -1,6 +1,8 @@
-# SQLite sidecar files. rates.db itself IS committed - it is the data the
-# hosted dashboard reads - but the write-ahead log and shared-memory files are
-# transient and must never be committed.
+# rates.db is NOT committed. It is a local build artefact, rebuilt from the CSV
+# files under data/ with `python cli.py rebuild`. Committing a 9 MB SQLite
+# binary through a browser upload corrupted it, and text survives git intact,
+# is a twentieth of the size, and can be diffed.
+rates.db
 rates.db-wal
 rates.db-shm
 rates.db-journal

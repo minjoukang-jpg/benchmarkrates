@@ -1,10 +1,11 @@
 # Normalise text to LF in the repository.
 * text=auto eol=lf
 
-# The golden CSV fixtures are compared byte-for-byte by tests/test_contract.py,
-# and export_csv emits LF. Git must never rewrite their line endings, or the
-# contract test would fail on a Windows checkout for no real reason.
+# CSV data and fixtures are compared byte-for-byte and are written with LF.
+# Git must never rewrite their line endings: the contract test would fail on a
+# Windows checkout, and a rewritten seed file would not match its re-export.
 tests/golden/*.csv -text
+data/*.csv -text
 
 # Windows shells need CRLF or they misparse.
 *.cmd text eol=crlf

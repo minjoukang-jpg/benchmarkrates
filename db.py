@@ -3,11 +3,19 @@
 One row per (curve, date, tenor). Stdlib only - no pip install required.
 """
 
+import csv
+import io
 import sqlite3
 import datetime
 import os
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rates.db")
+HERE = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(HERE, "rates.db")
+
+# The committed representation of the data. Plain CSV rather than the SQLite
+# file: text survives git and web uploads intact, is a fifth of the size, and
+# can be diffed. rates.db is a local build artefact rebuilt from these.
+DATA_DIR = os.path.join(HERE, "data")
 
 # Curve registry. Adding a new benchmark (e.g. MYOR) means adding a line here
 # plus a fetcher in sources.py - no schema migration needed.
@@ -196,6 +204,110 @@ def latest_date(conn, curve):
 
 def tenor_sort_key(tenor):
     return TENOR_MONTHS.get(tenor, 9999)
+
+
+# --------------------------------------------------------------------------
+# CSV representation - what actually gets committed
+# --------------------------------------------------------------------------
+
+def export_csv(conn, curve, start, end):
+    """Wide format - one row per date, one column per tenor. Paste-ready.
+
+    This is the single CSV formatter: the browser download, the committed seed
+    files under data/, and `cli.py export` all go through it, so they cannot
+    drift from one another. tests/test_contract.py pins the output
+    byte-for-byte.
+    """
+    rows = conn.execute(
+        "SELECT rate_date, tenor, rate FROM rates WHERE curve=? "
+        "AND rate_date BETWEEN ? AND ? ORDER BY rate_date DESC", (curve, start, end)).fetchall()
+    tenors = sorted({r["tenor"] for r in rows}, key=tenor_sort_key)
+    table = {}
+    for r in rows:
+        table.setdefault(r["rate_date"], {})[r["tenor"]] = r["rate"]
+
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["Date"] + tenors)
+    for date in sorted(table, reverse=True):
+        w.writerow([date] + [table[date].get(t, "") for t in tenors])
+    return buf.getvalue()
+
+
+def parse_csv(text):
+    """Inverse of export_csv. Returns [(date, tenor, rate)]."""
+    lines = [ln for ln in text.replace("\r\n", "\n").split("\n") if ln.strip()]
+    if not lines:
+        return []
+    header = next(csv.reader([lines[0]]))
+    tenors = header[1:]
+    out = []
+    for line in lines[1:]:
+        cells = next(csv.reader([line]))
+        if not cells or not cells[0]:
+            continue
+        date = cells[0]
+        for tenor, cell in zip(tenors, cells[1:]):
+            if cell == "":
+                continue
+            out.append((date, tenor, float(cell)))
+    return out
+
+
+def write_csv_files(conn, data_dir=DATA_DIR):
+    """Write one CSV per curve. Returns {curve: rows_written}."""
+    os.makedirs(data_dir, exist_ok=True)
+    written = {}
+    for curve in CURVES:
+        text = export_csv(conn, curve, "1900-01-01", "2999-12-31")
+        if text.count("\n") <= 1:          # header only: nothing stored yet
+            written[curve] = 0
+            continue
+        path = os.path.join(data_dir, f"{curve}.csv")
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        written[curve] = text.count("\n") - 1
+    return written
+
+
+def bulk_insert(conn, curve, rows):
+    """Insert without the per-row comparison upsert_rates does.
+
+    upsert_rates checks each row against what is stored so it can report how
+    much actually changed, which costs a SELECT per row. A rebuild from CSV has
+    nothing to compare against and runs tens of thousands of rows, so it uses
+    executemany instead - roughly two orders of magnitude faster, which matters
+    because the hosted app rebuilds at startup.
+    """
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    conn.executemany(
+        "INSERT INTO rates (curve, rate_date, tenor, rate, fetched_at) "
+        "VALUES (?,?,?,?,?) "
+        "ON CONFLICT(curve, rate_date, tenor) "
+        "DO UPDATE SET rate=excluded.rate, fetched_at=excluded.fetched_at",
+        [(curve, d, t, r, now) for d, t, r in rows if r is not None])
+    conn.commit()
+    return len(rows)
+
+
+def read_csv_files(conn, data_dir=DATA_DIR):
+    """Load every curve CSV into the database. Returns {curve: rows_loaded}."""
+    loaded = {}
+    for curve in CURVES:
+        path = os.path.join(data_dir, f"{curve}.csv")
+        if not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as fh:
+            rows = parse_csv(fh.read())
+        if rows:
+            bulk_insert(conn, curve, rows)
+        loaded[curve] = len(rows)
+    return loaded
+
+
+def csv_files_present(data_dir=DATA_DIR):
+    return bool(os.path.isdir(data_dir)
+                and [f for f in os.listdir(data_dir) if f.endswith(".csv")])
 
 
 # --------------------------------------------------------------------------

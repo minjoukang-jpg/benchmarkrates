@@ -6,6 +6,8 @@
     python cli.py backfill --curve BVAL
     python cli.py status            # coverage and last-run summary
     python cli.py doctor            # diagnose a source that has stopped working
+    python cli.py export            # write data/*.csv, the committed form
+    python cli.py rebuild           # rebuild rates.db from data/*.csv
 """
 
 import argparse
@@ -170,6 +172,38 @@ def cmd_backfill(args):
     return 0
 
 
+def cmd_export(args):
+    """Write the database out to the CSV files that get committed."""
+    conn = db.init()
+    written = db.write_csv_files(conn)
+    _out(f"Wrote CSV seed files to {db.DATA_DIR}")
+    for curve, n in written.items():
+        _out(f"  {curve:<8} {n:>6} date row(s)")
+    total = sum(written.values())
+    _out(f"Done. {total} row(s) across {len([n for n in written.values() if n])} curve(s).")
+    return 0
+
+
+def cmd_rebuild(args):
+    """Rebuild rates.db from the committed CSV files.
+
+    Used on a fresh checkout, and by the daily workflow, because rates.db is not
+    committed - the CSVs are. Rebuilding first means the anomaly guard still has
+    history to compare incoming data against.
+    """
+    conn = db.init()
+    if not db.csv_files_present():
+        _out(f"No CSV files found in {db.DATA_DIR}. Nothing to rebuild from.")
+        return 1
+    loaded = db.read_csv_files(conn)
+    _out(f"Rebuilt from {db.DATA_DIR}")
+    for curve, n in loaded.items():
+        _out(f"  {curve:<8} {n:>6} observation(s)")
+    conn.close()          # checkpoint needs an exclusive lock, so let go first
+    db.checkpoint()
+    return 0
+
+
 def cmd_status(args):
     conn = db.init()
     today = datetime.date.today()
@@ -301,10 +335,11 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     for name, fn in (("update", cmd_update), ("backfill", cmd_backfill),
-                     ("status", cmd_status), ("doctor", cmd_doctor)):
+                     ("status", cmd_status), ("doctor", cmd_doctor),
+                     ("export", cmd_export), ("rebuild", cmd_rebuild)):
         sp = sub.add_parser(name)
         sp.set_defaults(func=fn)
-        if name != "status":
+        if name in ("update", "backfill", "doctor"):
             sp.add_argument("--curve", choices=list(db.CURVES),
                             help="limit to one curve (default: all)")
         if name in ("update", "backfill"):

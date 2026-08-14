@@ -26,24 +26,29 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Rebuild the database from the committed CSVs
+        # rates.db is not in the repository; data/*.csv is. Rebuilding first
+        # gives the anomaly guard the history it needs to judge incoming data.
+        run: python cli.py rebuild
+
       - name: Fetch the latest rates
         env:
           PDEX_API_KEY: ${{ secrets.PDEX_API_KEY }}
         run: python cli.py update
+
+      - name: Write the CSVs back out
+        run: python cli.py export
 
       - name: Run the contract tests
         # If a source changed shape in a way that would alter the CSV format,
         # fail here rather than committing it.
         run: python tests/test_contract.py
 
-      - name: Fold the write-ahead log into the database file
-        run: python -c "import db; db.checkpoint()"
-
       - name: Commit if anything changed
         run: |
           git config user.name  "rates-bot"
           git config user.email "rates-bot@users.noreply.github.com"
-          git add rates.db
+          git add data
           if git diff --staged --quiet; then
             echo "No new rates today (weekend, public holiday, or already current)."
           else

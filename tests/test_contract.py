@@ -398,6 +398,66 @@ class TestMissedWeekdays(unittest.TestCase):
         self.assertGreater(db.missed_weekdays(conn, "BVAL", datetime.date(2026, 9, 1)), 3)
 
 
+class TestCsvRoundTrip(unittest.TestCase):
+    """The repository carries the data as CSV, so export then import must be
+    exactly lossless. If it is not, published data silently drifts from the
+    database it was written from."""
+
+    SAMPLE = [
+        ("2026-08-14", "3Y", 3.34), ("2026-08-14", "10Y", 3.7412),
+        ("2026-08-13", "3Y", 3.35), ("2026-08-13", "10Y", 3.74),
+        ("2026-08-12", "10Y", 3.7),          # a date missing one tenor
+    ]
+
+    def test_round_trip_preserves_every_value(self):
+        src = memory_db()
+        db.upsert_rates(src, "MGS", self.SAMPLE)
+        text = db.export_csv(src, "MGS", "1900-01-01", "2999-12-31")
+
+        dst = memory_db()
+        db.bulk_insert(dst, "MGS", db.parse_csv(text))
+
+        before = {(r[0], r[1]): r[2] for r in
+                  src.execute("SELECT rate_date, tenor, rate FROM rates")}
+        after = {(r[0], r[1]): r[2] for r in
+                 dst.execute("SELECT rate_date, tenor, rate FROM rates")}
+        self.assertEqual(before, after)
+
+    def test_re_export_is_byte_identical(self):
+        src = memory_db()
+        db.upsert_rates(src, "MGS", self.SAMPLE)
+        text = db.export_csv(src, "MGS", "1900-01-01", "2999-12-31")
+
+        dst = memory_db()
+        db.bulk_insert(dst, "MGS", db.parse_csv(text))
+        self.assertEqual(text, db.export_csv(dst, "MGS", "1900-01-01", "2999-12-31"))
+
+    def test_gaps_stay_gaps(self):
+        """An empty cell must not become a zero, which would look like a real rate."""
+        src = memory_db()
+        db.upsert_rates(src, "MGS", self.SAMPLE)
+        text = db.export_csv(src, "MGS", "1900-01-01", "2999-12-31")
+        parsed = db.parse_csv(text)
+        self.assertNotIn(("2026-08-12", "3Y"), {(d, t) for d, t, _ in parsed})
+        self.assertEqual(len(parsed), len(self.SAMPLE))
+
+    def test_full_precision_survives(self):
+        src = memory_db()
+        db.upsert_rates(src, "BVAL", [("2026-08-13", "3M", 4.9436)])
+        text = db.export_csv(src, "BVAL", "1900-01-01", "2999-12-31")
+        self.assertEqual(db.parse_csv(text)[0][2], 4.9436)
+
+    def test_bulk_insert_matches_upsert(self):
+        a, b = memory_db(), memory_db()
+        db.upsert_rates(a, "MGS", self.SAMPLE)
+        db.bulk_insert(b, "MGS", self.SAMPLE)
+        self.assertEqual(
+            [tuple(r) for r in a.execute(
+                "SELECT curve, rate_date, tenor, rate FROM rates ORDER BY rate_date, tenor")],
+            [tuple(r) for r in b.execute(
+                "SELECT curve, rate_date, tenor, rate FROM rates ORDER BY rate_date, tenor")])
+
+
 class TestThreadSafety(unittest.TestCase):
     """The hosted dashboard reruns its script on a different thread every time a
     widget changes. A connection shared across those threads raises
