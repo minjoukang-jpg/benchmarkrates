@@ -13,6 +13,7 @@ Stdlib unittest only. Does not touch the network or the real database.
 
 import datetime
 import os
+import re
 import sqlite3
 import sys
 import unittest
@@ -532,6 +533,54 @@ class TestCsvRoundTrip(unittest.TestCase):
                 "SELECT curve, rate_date, tenor, rate FROM rates ORDER BY rate_date, tenor")],
             [tuple(r) for r in b.execute(
                 "SELECT curve, rate_date, tenor, rate FROM rates ORDER BY rate_date, tenor")])
+
+
+class TestMarketLayout(unittest.TestCase):
+    """Cards are grouped into market columns, left to right, each with a flag."""
+
+    def test_order_is_philippines_malaysia_united_states(self):
+        self.assertEqual([m for m, _, _ in db.curves_by_market()],
+                         ["Philippines", "Malaysia", "United States"])
+
+    def test_every_curve_lands_in_exactly_one_column(self):
+        placed = [c for _, _, curves in db.curves_by_market() for c in curves]
+        self.assertEqual(sorted(placed), sorted(db.CURVES),
+                         "a curve is missing from the layout or duplicated")
+        self.assertEqual(len(placed), len(set(placed)))
+
+    def test_every_market_has_a_flag(self):
+        for market, flag, _ in db.curves_by_market():
+            self.assertTrue(flag.startswith("<svg"), f"{market} has no flag")
+            self.assertIn("</svg>", flag)
+
+    def test_flags_are_svg_not_emoji(self):
+        """Windows has no flag glyphs, so emoji would render as a boxed 'PH'."""
+        for market, flag, _ in db.curves_by_market():
+            self.assertNotIn("\U0001F1E6", flag, f"{market} uses a regional indicator")
+
+    def test_malaysia_star_is_a_polygon_not_a_ring(self):
+        """It was drawn as a circle inside a circle, which reads as a ring."""
+        flag = db.MARKET_FLAGS["Malaysia"]
+        self.assertIn("<polygon", flag)
+        points = re.search(r'points="([^"]+)"', flag).group(1).split()
+        self.assertEqual(len(points), 28, "a 14-point star needs 28 vertices")
+        # Two circles only: the crescent. Any more means the ring came back.
+        self.assertEqual(flag.count("<circle"), 2)
+
+    def test_flag_shapes_stay_inside_their_viewbox(self):
+        for market, flag, _ in db.curves_by_market():
+            for x, y in re.findall(r'c[xy]="([\d.]+)"\s+cy="([\d.]+)"', flag):
+                self.assertLessEqual(float(x), 24, f"{market} shape overflows")
+                self.assertLessEqual(float(y), 16, f"{market} shape overflows")
+
+    def test_star_generator_geometry(self):
+        pts = db._star_points(10, 8, 4, 2, 5).split()
+        self.assertEqual(len(pts), 10)
+        radii = [round(((float(p.split(",")[0]) - 10) ** 2
+                        + (float(p.split(",")[1]) - 8) ** 2) ** 0.5, 2)
+                 for p in pts]
+        self.assertEqual(sorted(set(radii)), [2.0, 4.0],
+                         "vertices must alternate between inner and outer radius")
 
 
 class TestHeadlineTenor(unittest.TestCase):

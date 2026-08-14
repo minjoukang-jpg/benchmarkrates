@@ -5,6 +5,7 @@ One row per (curve, date, tenor). Stdlib only - no pip install required.
 
 import csv
 import io
+import math
 import sqlite3
 import datetime
 import os
@@ -90,6 +91,80 @@ CURVES = {
         "headline_tenor": "O/N",
     },
 }
+
+# Left-to-right order of the market columns on the dashboards.
+MARKET_ORDER = ["Philippines", "Malaysia", "United States"]
+
+# Flags drawn as inline SVG rather than emoji. Windows has no flag glyphs, so
+# emoji regional indicators render as a boxed letter pair ("PH") in Chrome on
+# Windows - which is where these are actually read. SVG looks the same
+# everywhere and needs no font support or external asset.
+_FLAG_VIEWBOX = 'viewBox="0 0 24 16" width="24" height="16" xmlns="http://www.w3.org/2000/svg"'
+
+
+def _star_points(cx, cy, outer, inner, points, rotate=-90.0):
+    """Vertices for an n-pointed star, alternating outer and inner radius."""
+    coords = []
+    for i in range(points * 2):
+        radius = outer if i % 2 == 0 else inner
+        angle = math.radians(rotate + i * 180.0 / points)
+        coords.append(f"{cx + radius * math.cos(angle):.2f},"
+                      f"{cy + radius * math.sin(angle):.2f}")
+    return " ".join(coords)
+
+MARKET_FLAGS = {
+    "Philippines": (
+        f'<svg {_FLAG_VIEWBOX} role="img" aria-label="Philippines">'
+        '<rect width="24" height="8" fill="#0038a8"/>'
+        '<rect y="8" width="24" height="8" fill="#ce1126"/>'
+        '<path d="M0 0 L10.4 8 L0 16 Z" fill="#fff"/>'
+        '<circle cx="3.2" cy="8" r="1.8" fill="#fcd116"/>'
+        '<circle cx="1.5" cy="2.4" r="0.55" fill="#fcd116"/>'
+        '<circle cx="1.5" cy="13.6" r="0.55" fill="#fcd116"/>'
+        '<circle cx="7.9" cy="8" r="0.55" fill="#fcd116"/>'
+        '</svg>'),
+    "Malaysia": (
+        f'<svg {_FLAG_VIEWBOX} role="img" aria-label="Malaysia">'
+        '<rect width="24" height="16" fill="#fff"/>'
+        + "".join(f'<rect y="{i * 16 / 14:.3f}" width="24" height="{16 / 14:.3f}" fill="#cc0001"/>'
+                  for i in range(0, 14, 2)) +
+        '<rect width="13" height="9.143" fill="#010066"/>'
+        # Crescent: a yellow disc with a canton-blue disc cut out of its right,
+        # so the opening faces the star, as on the real flag.
+        '<circle cx="5.0" cy="4.55" r="2.85" fill="#ffcc00"/>'
+        '<circle cx="6.35" cy="4.55" r="2.45" fill="#010066"/>'
+        # The Bintang Persekutuan, a 14-point star, not a ring.
+        f'<polygon points="{_star_points(8.95, 4.55, 2.05, 0.95, 14)}" fill="#ffcc00"/>'
+        '</svg>'),
+    "United States": (
+        f'<svg {_FLAG_VIEWBOX} role="img" aria-label="United States">'
+        '<rect width="24" height="16" fill="#fff"/>'
+        + "".join(f'<rect y="{i * 16 / 13:.3f}" width="24" height="{16 / 13:.3f}" fill="#b22234"/>'
+                  for i in range(0, 13, 2)) +
+        '<rect width="10" height="8.615" fill="#3c3b6e"/>'
+        + "".join(f'<circle cx="{1.4 + c * 1.75:.2f}" cy="{1.4 + r * 1.95:.2f}" r="0.42" fill="#fff"/>'
+                  for r in range(4) for c in range(5)) +
+        '</svg>'),
+}
+
+
+def curves_by_market():
+    """[(market, flag_svg, [curve, ...]), ...] in display order."""
+    grouped = []
+    for market in MARKET_ORDER:
+        members = [c for c, m in CURVES.items() if m["market"] == market]
+        if members:
+            grouped.append((market, MARKET_FLAGS.get(market, ""), members))
+    # Any market not listed in MARKET_ORDER still gets shown, on the end.
+    for curve, meta in CURVES.items():
+        if meta["market"] not in MARKET_ORDER:
+            existing = next((g for g in grouped if g[0] == meta["market"]), None)
+            if existing:
+                existing[2].append(curve)
+            else:
+                grouped.append((meta["market"], MARKET_FLAGS.get(meta["market"], ""), [curve]))
+    return grouped
+
 
 # Sort weight for tenors, expressed in months. Used for ordering term structures.
 TENOR_MONTHS = {

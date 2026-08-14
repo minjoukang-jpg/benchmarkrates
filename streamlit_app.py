@@ -193,45 +193,61 @@ for m in meta:
 # -- latest rates ----------------------------------------------------------
 st.subheader("Latest rates")
 
-# Wrap into rows of three. One column per curve becomes unreadably narrow once
-# there are more than three or four curves.
-PER_ROW = 3
-rows_of_meta = [meta[i:i + PER_ROW] for i in range(0, len(meta), PER_ROW)]
-cards = []
-for chunk in rows_of_meta:
-    cols = st.columns(PER_ROW)          # pad the last row so widths stay even
-    cards.extend(zip(cols, chunk))
+st.markdown("""
+<style>
+.mkt-head { display:flex; align-items:center; gap:9px; margin:0 0 14px;
+            padding-bottom:9px; border-bottom:1px solid rgba(128,128,128,.28); }
+.mkt-head .flag { display:inline-flex; line-height:0; border-radius:3px;
+                  overflow:hidden; box-shadow:0 0 0 1px rgba(128,128,128,.35); }
+.mkt-head .name { font-size:15px; font-weight:650; letter-spacing:-0.01em; }
+.mkt-head .count { font-size:12px; opacity:.6; margin-left:auto; }
+</style>
+""", unsafe_allow_html=True)
 
-for col, m in cards:
+meta_by_curve = {m["curve"]: m for m in meta}
+groups = db.curves_by_market()
+
+# One column per market, left to right: Philippines, Malaysia, United States.
+# Malaysia carries five curves against one each side, so its column runs longer.
+for col, (market, flag, curve_names) in zip(st.columns(len(groups)), groups):
     with col:
-        if not m["rows"]:
-            st.metric(m["label"], "no data")
-            continue
-        latest = load_latest(m["curve"])
-        rows = latest["rows"]
-        # Which tenor headlines the card is declared per curve in db.CURVES and
-        # resolved by get_latest, so both dashboards agree.
-        head = next((r for r in rows if r["tenor"] == latest["headline"]), rows[0])
-        change = head["change_bp"]
-        st.metric(
-            label=f"{m['label']} · {head['tenor']}",
-            value=f"{head['rate']:.3f}%",
-            delta=None if change is None else f"{change:+.1f} bp",
-            # A rising benchmark raises borrowing cost, so a rise reads red.
-            # An unchanged rate stays neutral rather than showing as a red rise.
-            delta_color="off" if not change else "inverse")
-        st.caption(f"{nice_date(latest['date'])} · {m['source']}")
+        st.markdown(
+            f'<div class="mkt-head"><span class="flag">{flag}</span>'
+            f'<span class="name">{market}</span>'
+            f'<span class="count">{len(curve_names)} benchmark'
+            f'{"s" if len(curve_names) != 1 else ""}</span></div>',
+            unsafe_allow_html=True)
 
-        frame = pd.DataFrame([{
-            "Tenor": r["tenor"],
-            "Rate %": r["rate"],
-            "Chg bp": r["change_bp"],
-        } for r in rows])
-        st.dataframe(frame, hide_index=True, use_container_width=True,
-                     column_config={
-                         "Rate %": st.column_config.NumberColumn(format="%.3f"),
-                         "Chg bp": st.column_config.NumberColumn(format="%+.1f"),
-                     })
+        for curve in curve_names:
+            m = meta_by_curve[curve]
+            if not m["rows"]:
+                st.metric(m["label"], "no data")
+                continue
+            latest = load_latest(curve)
+            rows = latest["rows"]
+            # Which tenor headlines the card is declared per curve in db.CURVES
+            # and resolved by get_latest, so both dashboards agree.
+            head = next((r for r in rows if r["tenor"] == latest["headline"]), rows[0])
+            change = head["change_bp"]
+            st.metric(
+                label=f"{m['label']} · {head['tenor']}",
+                value=f"{head['rate']:.3f}%",
+                delta=None if change is None else f"{change:+.1f} bp",
+                # A rising benchmark raises borrowing cost, so a rise reads red.
+                # An unchanged rate stays neutral rather than as a red rise.
+                delta_color="off" if not change else "inverse")
+            st.caption(f"{nice_date(latest['date'])} · {m['source']}")
+
+            frame = pd.DataFrame([{
+                "Tenor": r["tenor"],
+                "Rate %": r["rate"],
+                "Chg bp": r["change_bp"],
+            } for r in rows])
+            st.dataframe(frame, hide_index=True, use_container_width=True,
+                         column_config={
+                             "Rate %": st.column_config.NumberColumn(format="%.3f"),
+                             "Chg bp": st.column_config.NumberColumn(format="%+.1f"),
+                         })
 
 st.divider()
 

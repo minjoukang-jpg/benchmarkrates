@@ -228,6 +228,10 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/meta":
                 return self._json({
                     "curves": get_meta(conn),
+                    # Grouped left-to-right by market, with an inline SVG flag,
+                    # so both dashboards lay out identically.
+                    "markets": [{"market": m, "flag": f, "curves": c}
+                                for m, f, c in db.curves_by_market()],
                     "today": datetime.date.today().isoformat(),
                     "refresh": _refresh_state,
                 })
