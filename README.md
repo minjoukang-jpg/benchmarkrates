@@ -260,7 +260,6 @@ No schema migration is needed - the tables are keyed on curve name.
 | `run_daily.cmd` | Local daily update, if you ever re-enable the Windows task |
 | `install_task.ps1` | Registers/removes the Windows task (currently not registered) |
 | `open_app.cmd` | Starts the local dashboard |
-| `push_to_github.cmd` | Uploads to GitHub by command line, as an alternative to the web |
 | `update.log` | Rolling log of daily runs |
 | `tests/test_contract.py` | Format and resilience tests |
 | `tests/golden/` | Reference CSV exports the tests compare against |
