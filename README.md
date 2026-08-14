@@ -6,9 +6,28 @@ A local database and dashboard for the base interest rates of our key markets.
 |---|---|---|---|---|
 | Philippines | PHP | BVAL | 1M, 3M, 6M, 1Y, 2Y, 3Y, 4Y, 5Y, 7Y, 10Y, 20Y, 25Y | 15 Aug 2022 |
 | Malaysia | MYR | KLIBOR | 1M, 3M, 6M (plus discontinued 2M, 9M, 12M) | 5 Jan 2007 |
+| Malaysia | MYR | MYOR | O/N, 1M, 3M, 6M | 24 Sep 2021 |
+| Malaysia | MYR | MYOR-i (Islamic) | O/N, 1M, 3M, 6M | 25 Mar 2022 |
 | Malaysia | MYR | MGS | 3Y, 5Y, 7Y, 10Y | Jan 2022 |
 | Malaysia | MYR | MGII (Islamic) | 3Y, 5Y, 7Y, 10Y | Jan 2022 |
 | United States | USD | SOFR | Overnight | 2 Apr 2018 |
+
+**MYOR is not a drop-in replacement for KLIBOR, and the gap is large.** On
+13 Aug 2026 the 3M rates were MYOR 2.761% against KLIBOR 3.460% - about **70
+basis points apart**, and 6M was similar. That is structural, not noise: MYOR is
+computed from actual overnight transactions and tracks the policy rate, while
+KLIBOR is submission-based and embeds bank credit and term premium. So a facility
+that switches its reference from KLIBOR to MYOR needs its margin re-cut by
+roughly that much, or the economics change materially. Both are held here so the
+spread can be measured on any date rather than assumed. The 1M, 3M and 6M MYOR
+figures are **backward-looking compounded averages**, not forward-looking term
+rates, so they are not directly comparable to a KLIBOR fixing even before the
+level difference.
+
+**MYOR-i** is the Shariah-compliant equivalent, drawn from Islamic money market
+transactions. It tracks MYOR closely: 1M was 2.755% against 2.753% on the same
+date. For Sukuk floating-rate pricing this is the correct overnight benchmark,
+as MGII is for the yield curve.
 
 **MGS vs MGII, and which to use for Sukuk.** Both are Malaysian government
 paper published by BNM on the same page. MGS is conventional; **MGII
@@ -240,6 +259,7 @@ python tests\test_contract.py
 |---|---|---|
 | BVAL | PDEx, `pds.com.ph` | GraphQL API, one request per trade date |
 | KLIBOR | Bank Negara Malaysia FMIP | Server-rendered table, parsed from HTML |
+| MYOR / MYOR-i | Bank Negara Malaysia FMIP | Separate pages, one request per date window |
 | MGS / MGII | Bank Negara Malaysia FMIP | Benchmark yields page, one request per trade date, serving both curves |
 | SOFR | Federal Reserve Bank of New York | Public JSON API |
 
@@ -265,6 +285,16 @@ printed.
   publication - it is normal, not an error.
 - **SOFR is published one business day in arrears**, so a 2-day age on the USD
   card is expected, not stale.
+- **MYOR and MYOR-i are published one business day after the reference date.**
+  The stored date is the reference date, not the publication date, which is why
+  the parser reads that column by name - the table carries both, and taking the
+  wrong one would shift every rate by a day. Their alarm tolerance is 4 weekdays
+  rather than 3 to allow for the lag.
+- **MYOR's table contains a compounding Index around 1.14 and a volume in the
+  tens of thousands.** Neither is a rate. The index in particular sits inside the
+  plausible range for a percentage, so the rate validator cannot catch it if the
+  columns are misread - only the header mapping prevents it. There are tests for
+  exactly this.
 - **A starred MGS or MGII yield means no trade occurred that day.** BNM still
   publishes the close, so the value is stored and the marker stripped. It is an
   indicative level rather than a traded one, which matters if you are quoting a

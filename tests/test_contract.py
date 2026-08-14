@@ -248,6 +248,81 @@ class TestBenchmarkYieldParsing(unittest.TestCase):
         self.assertEqual(dict(got["MGII"]), {"5Y": 3.54})
 
 
+MYOR_TABLE = (
+    "<table><thead>"
+    "<th>Reference Date</th><th>Publication Date</th><th>Reference Rate</th>"
+    "<th>Aggregate Volume (MYR Mil)</th><th>Index</th>"
+    "<th>1M Average</th><th>3M Average</th><th>6M Average</th>"
+    "</thead><tbody>"
+    "<tr><td>13/08/2026</td><td>14/08/2026</td><td>2.75</td><td>51,549.48</td>"
+    "<td>1.1401270471</td><td>2.75303</td><td>2.76076</td><td>2.76974</td></tr>"
+    "<tr><td>23/09/2021</td><td>24/09/2021</td><td>-</td><td>-</td>"
+    "<td>1.0000000000</td><td>-</td><td>-</td><td>-</td></tr>"
+    "</tbody></table>")
+
+
+class TestMyorParsing(unittest.TestCase):
+    """MYOR's table has two date columns, a volume, and a compounding index that
+    sits near 1.14 - inside the plausible range for a percentage. The rate
+    validator cannot catch that, so header mapping is the only defence."""
+
+    def test_only_rate_columns_are_taken(self):
+        rows = sources.parse_myor_html(MYOR_TABLE)
+        got = {(d, t): r for d, t, r in rows}
+        self.assertEqual(got, {
+            ("2026-08-13", "O/N"): 2.75,
+            ("2026-08-13", "1M"): 2.75303,
+            ("2026-08-13", "3M"): 2.76076,
+            ("2026-08-13", "6M"): 2.76974,
+        })
+
+    def test_index_column_is_never_stored_as_a_rate(self):
+        rows = sources.parse_myor_html(MYOR_TABLE)
+        self.assertNotIn(1.1401270471, [r for _, _, r in rows],
+                         "the compounding index was stored as a rate")
+
+    def test_volume_column_is_never_stored_as_a_rate(self):
+        rows = sources.parse_myor_html(MYOR_TABLE)
+        self.assertNotIn(51549.48, [r for _, _, r in rows],
+                         "aggregate volume was stored as a rate")
+
+    def test_reference_date_used_not_publication_date(self):
+        """MYOR publishes a day in arrears. Using the publication date would tag
+        every rate with the wrong day."""
+        dates = {d for d, _, _ in sources.parse_myor_html(MYOR_TABLE)}
+        self.assertEqual(dates, {"2026-08-13"})
+        self.assertNotIn("2026-08-14", dates)
+
+    def test_rows_before_first_publication_are_skipped(self):
+        """The index base date carries dashes instead of rates."""
+        dates = {d for d, _, _ in sources.parse_myor_html(MYOR_TABLE)}
+        self.assertNotIn("2021-09-23", dates)
+
+    def test_reordered_columns_follow_the_header(self):
+        table = (
+            "<table><thead>"
+            "<th>Publication Date</th><th>Reference Date</th>"
+            "<th>6M Average</th><th>Index</th><th>Reference Rate</th>"
+            "</thead><tbody>"
+            "<tr><td>14/08/2026</td><td>13/08/2026</td><td>2.76974</td>"
+            "<td>1.1401270471</td><td>2.75</td></tr>"
+            "</tbody></table>")
+        got = {(d, t): r for d, t, r in sources.parse_myor_html(table)}
+        self.assertEqual(got, {("2026-08-13", "6M"): 2.76974,
+                               ("2026-08-13", "O/N"): 2.75})
+
+    def test_missing_header_refuses_rather_than_guessing(self):
+        body = MYOR_TABLE[MYOR_TABLE.index("<tbody>"):]
+        with self.assertRaises(sources.FetchError):
+            sources.parse_myor_html("<table>" + body)
+
+    def test_missing_reference_date_column_raises(self):
+        table = ("<table><thead><th>Publication Date</th><th>Reference Rate</th></thead>"
+                 "<tbody><tr><td>14/08/2026</td><td>2.75</td></tr></tbody></table>")
+        with self.assertRaises(sources.FetchError):
+            sources.parse_myor_html(table)
+
+
 class TestValidation(unittest.TestCase):
 
     def test_accepts_good_data(self):

@@ -54,6 +54,11 @@ def _fetch(conn, curve, full):
             return sources.fetch_klibor(), None
         return sources.fetch_klibor(today - datetime.timedelta(days=LOOKBACK_DAYS), today), None
 
+    if curve in sources.BNM_MYOR_URLS:
+        start = (sources.MYOR_HISTORY_START if full
+                 else today - datetime.timedelta(days=LOOKBACK_DAYS))
+        return sources.fetch_myor(curve, start, today), None
+
     if curve in PER_DAY_CURVES:
         if full:
             start = BVAL_HISTORY_START if curve == "BVAL" else BENCHMARK_HISTORY_START
@@ -135,8 +140,12 @@ def update_curve(conn, curve, full=False, force=False, quiet=False):
 
     if not quiet:
         _out(f"  {curve:<8} {written:>6} new/changed   latest: {db.latest_date(conn, curve)}")
-        if outcome.strategy and not outcome.strategy.endswith(("search", "date-range", "graphql")):
-            _out(f"           note: used fallback path '{outcome.strategy}'")
+        # _try_strategies prefixes the detail with "recovered after" only when an
+        # earlier strategy failed, which is a reliable signal. Guessing from the
+        # strategy name is not - it flagged primary paths as fallbacks.
+        if outcome.detail.startswith("recovered after"):
+            _out(f"           note: primary path failed, recovered via "
+                 f"'{outcome.strategy}'. {outcome.detail}")
         if outcome.degraded:
             _out(f"           WARNING: {outcome.detail}")
     return written
@@ -315,6 +324,12 @@ def _hint(curve, detail):
         if "no table" in d or "header" in d:
             return ("BNM changed the page layout. Open the URL above, view source, and check "
                     "the <thead>/<tr> structure against parse_klibor_html() in sources.py.")
+        return "Open the BNM URL above in a browser. If it loads, the parser needs updating."
+    if curve in ("MYOR", "MYORI"):
+        if "header" in d or "cannot be read by position" in d:
+            return ("BNM changed the MYOR table layout. It has two date columns plus a "
+                    "compounding index, so parse_myor_html() maps columns by header name "
+                    "and refuses to guess. Open the URL above and compare the headers.")
         return "Open the BNM URL above in a browser. If it loads, the parser needs updating."
     if curve in ("MGS", "MGII"):
         if "header" in d or "no mgs or mgii" in d:

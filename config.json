@@ -16,7 +16,10 @@
     "KLIBOR": 3,
     "MGS": 3,
     "MGII": 3,
+    "MYOR": 4,
+    "MYORI": 4,
     "SOFR": 4
   },
+  "_myor_tolerance_note": "MYOR and MYOR-i are published one business day after the reference date, like SOFR, so they get the same wider tolerance.",
   "_missed_weekdays_help": "A source is only treated as broken after this many consecutive weekdays with nothing published. This absorbs public holidays without needing a holiday calendar, and covers SOFR publishing one business day in arrears."
 }

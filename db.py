@@ -36,6 +36,24 @@ CURVES = {
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-klibor",
     },
+    "MYOR": {
+        "currency": "MYR",
+        "market": "Malaysia",
+        "label": "MYR MYOR",
+        "description": ("Malaysia Overnight Rate, the transaction-based benchmark BNM is "
+                        "transitioning to from KLIBOR, with compounded 1M, 3M and 6M averages"),
+        "source": "Bank Negara Malaysia FMIP",
+        "url": "https://financialmarkets.bnm.gov.my/data-download-myor",
+    },
+    "MYORI": {
+        "currency": "MYR",
+        "market": "Malaysia",
+        "label": "MYR MYOR-i (Islamic)",
+        "description": ("Malaysia Overnight Rate-i, the Shariah-compliant equivalent of MYOR, "
+                        "based on Islamic money market transactions"),
+        "source": "Bank Negara Malaysia FMIP",
+        "url": "https://financialmarkets.bnm.gov.my/data-download-myori",
+    },
     "MGS": {
         "currency": "MYR",
         "market": "Malaysia",

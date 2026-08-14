@@ -56,6 +56,8 @@ KLIBOR_FALLBACK_TENORS = ["1M", "2M", "3M", "6M", "9M", "12M"]
 CURVE_TENORS = {
     "BVAL": {"1M", "3M", "6M", "1Y", "2Y", "3Y", "4Y", "5Y", "7Y", "10Y", "20Y", "25Y"},
     "KLIBOR": {"1M", "2M", "3M", "6M", "9M", "12M"},
+    "MYOR": {"O/N", "1M", "3M", "6M"},
+    "MYORI": {"O/N", "1M", "3M", "6M"},
     "MGS": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
     "MGII": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
     "SOFR": {"O/N"},
@@ -464,6 +466,111 @@ def fetch_klibor(start=None, end=None):
 
 
 # --------------------------------------------------------------------------
+# MYR MYOR and MYOR-i - BNM overnight reference rates
+#
+# The table is unusually easy to misread and needs strict header mapping:
+#   Reference Date | Publication Date | Reference Rate | Aggregate Volume |
+#   Index | 1M Average | 3M Average | 6M Average
+# There are TWO date columns, and MYOR publishes a day in arrears, so taking the
+# first date column blindly would tag every rate with the wrong day. There is
+# also a compounding Index that sits around 1.14 - inside the plausible range for
+# a percentage, so the rate validator would happily store it as a rate. Only the
+# header mapping stops that.
+# --------------------------------------------------------------------------
+
+BNM_MYOR_URLS = {
+    "MYOR": "https://financialmarkets.bnm.gov.my/data-download-myor",
+    "MYORI": "https://financialmarkets.bnm.gov.my/data-download-myori",
+}
+
+# Header label (lowercased, matched by prefix) to the tenor it represents.
+# Anything not listed here is deliberately ignored.
+MYOR_RATE_COLUMNS = {
+    "reference rate": "O/N",
+    "1m average": "1M",
+    "3m average": "3M",
+    "6m average": "6M",
+}
+MYOR_DATE_COLUMN = "reference date"
+
+MYOR_HISTORY_START = datetime.date(2021, 9, 1)
+
+
+def parse_myor_html(html):
+    """Returns [(date_iso, tenor, rate)] for a MYOR or MYOR-i page.
+
+    Raises FetchError rather than guessing if the header is absent: the columns
+    here cannot safely be read by position.
+    """
+    head = _THEAD_RE.search(html)
+    if not head:
+        raise FetchError(
+            "BNM MYOR page has no table header. The columns include two dates, a "
+            "volume and a compounding index, so they cannot be read by position - "
+            "refusing to guess")
+
+    labels = [_clean(c).lower() for c in _TH_RE.findall(head.group(1))]
+    date_idx = next((i for i, l in enumerate(labels) if l.startswith(MYOR_DATE_COLUMN)), None)
+    if date_idx is None:
+        raise FetchError(
+            f"BNM MYOR page has no '{MYOR_DATE_COLUMN}' column (headers: {labels}). "
+            f"The layout has changed")
+
+    tenor_by_idx = {}
+    for i, label in enumerate(labels):
+        for prefix, tenor in MYOR_RATE_COLUMNS.items():
+            if label.startswith(prefix):
+                tenor_by_idx[i] = tenor
+                break
+    if not tenor_by_idx:
+        raise FetchError(
+            f"BNM MYOR page exposes no recognised rate columns (headers: {labels})")
+
+    rows = []
+    for tr in _ROW_RE.findall(html):
+        cells = [_clean(c) for c in _CELL_RE.findall(tr)]
+        if len(cells) <= date_idx:
+            continue
+        m = _DATE_RE.match(cells[date_idx])
+        if not m:
+            continue                       # header, footnote, or a summary tile
+        dd, mm, yyyy = m.groups()
+        iso = f"{yyyy}-{mm}-{dd}"
+        for idx, tenor in tenor_by_idx.items():
+            if idx >= len(cells):
+                continue
+            try:
+                rows.append((iso, tenor, float(cells[idx].replace(",", ""))))
+            except ValueError:
+                continue                   # "-" before a rate was first published
+    return rows
+
+
+def fetch_myor(curve, start=None, end=None):
+    """MYOR or MYOR-i over a date window.
+
+    Unlike the KLIBOR page, date_range=all_date returns only a handful of rows
+    here, so an explicit window is always supplied.
+    """
+    base = BNM_MYOR_URLS[curve]
+    start = start or MYOR_HISTORY_START
+    end = end or datetime.date.today()
+
+    def strategy():
+        url = (f"{base}?date_range=month_date"
+               f"&date_select={start.isoformat()}&date_end={end.isoformat()}")
+        body, status = _request(url, timeout=180)
+        if status >= 400:
+            raise FetchError(f"BNM returned HTTP {status} for {curve}")
+        return parse_myor_html(body), False
+
+    out = _try_strategies([("bnm-myor-range", strategy)])
+    if out.ok:
+        validate_rows(curve, out.rows)
+    return out
+
+
+# --------------------------------------------------------------------------
 # MYR MGS and MGII - BNM benchmark yields, one page per trade date
 #
 # MGS is the conventional government bond benchmark; MGII is the Islamic one
@@ -675,6 +782,8 @@ def probe(curve):
         return fetch_sofr(today - datetime.timedelta(days=10), today)
     if curve == "KLIBOR":
         return fetch_klibor(today - datetime.timedelta(days=10), today)
+    if curve in BNM_MYOR_URLS:
+        return fetch_myor(curve, today - datetime.timedelta(days=10), today)
     if curve in ("BVAL", "MGS", "MGII"):
         # Walk back to the most recent weekday that published, so a probe run
         # on a Monday morning or a holiday does not look like a failure.
