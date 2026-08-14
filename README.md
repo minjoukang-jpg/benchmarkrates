@@ -12,15 +12,26 @@ Everything runs on this machine. The fetcher, database and local dashboard use
 the Python standard library only, so there is nothing to `pip install` and no
 admin rights are needed.
 
-There is also a **hosted version** for sharing with colleagues: `streamlit_app.py`
-runs on Streamlit Cloud with GitHub Actions doing the daily fetch, so no laptop
-needs to be on. It reads the same database and reuses the same data-access code,
-so the two dashboards cannot drift apart. See [DEPLOY.md](DEPLOY.md) for the
-steps and the trade-offs, including the data-governance question about hosting
-outside the ib vogt tenant. The hosted version needs `pip install -r
-requirements.txt`; the local one does not.
+The **hosted version** at
+<https://github.com/minjoukang-jpg/benchmarkrates> is the one colleagues use.
+`streamlit_app.py` runs on Streamlit Cloud, with GitHub Actions doing the daily
+fetch, so no laptop needs to be on. It reads the same database and reuses the
+same data-access code as the local app, so the two cannot drift apart. See
+[DEPLOY.md](DEPLOY.md) for how it is wired together.
+
+**Do not delete `streamlit_app.py` or `requirements.txt`.** Streamlit Cloud runs
+the hosted site directly from those two files.
+
+Streamlit is not installed on this machine. It does not need to be: Streamlit
+Cloud installs `requirements.txt` itself. To preview hosted changes locally
+before uploading them, install it temporarily with
+`pip install --user -r requirements.txt` and run
+`python -m streamlit run streamlit_app.py`.
 
 ## Daily use
+
+The hosted dashboard is the everyday one. The local app below is an offline
+fallback that keeps working with no internet and no external service.
 
 Double-click **`open_app.cmd`**, or run:
 
@@ -44,19 +55,40 @@ The dashboard gives you:
 
 ## Automatic daily updates
 
-A Windows scheduled task, **"Benchmark Rates Daily Update"**, runs
-`run_daily.cmd` at **08:15 on weekdays**. If the laptop is off at that time the
-task runs at the next opportunity. Output is appended to `update.log`.
+**Updates run on GitHub, not on this laptop.** The workflow in
+`.github/workflows/daily-update.yml` runs at **09:30 Manila and Kuala Lumpur
+time on weekdays**, fetches the three sources, runs the contract tests, and
+commits the refreshed `rates.db` back to the repository. Streamlit Cloud
+redeploys on that commit, so the hosted dashboard picks it up automatically.
+
+Nothing needs to be switched on here. The Windows scheduled task that used to
+do this was removed once GitHub Actions took over, so that only one thing
+writes to the database.
+
+To watch a run or trigger one by hand, use the **Actions** tab of the
+repository.
+
+The update is **idempotent** - running it twice writes nothing the second time,
+and it re-checks the previous 45 days each run so a late publication or a
+revision is picked up rather than missed permanently.
+
+### Running the update locally instead
+
+Still possible, and useful for testing or if you ever stop hosting. This
+updates the local `rates.db` only; it does not touch GitHub.
+
+```bash
+python cli.py update
+```
+
+To bring the Windows scheduled task back:
 
 ```bash
 powershell -ExecutionPolicy Bypass -File install_task.ps1 -Time 09:00
 ```
 
-Re-run with a different `-Time` to reschedule, or `-Remove` to delete the task.
-
-The update is **idempotent** - running it twice writes nothing the second time,
-and it re-checks the previous 45 days each run so a late publication or a
-revision is picked up rather than missed permanently.
+Do not run both at once. Two schedules writing the same database is how you get
+conflicting copies.
 
 ## Command line
 
@@ -148,9 +180,12 @@ python cli.py doctor
 ```
 
 `doctor` probes each source live, reports which strategy worked, what came
-back, and for a failure prints a specific fix rather than a stack trace. The
-scheduled task also exits non-zero on failure, so **Task Scheduler's
-`LastTaskResult`** is 1 when something needs attention.
+back, and for a failure prints a specific fix rather than a stack trace.
+
+`cli.py update` also exits non-zero on failure, so a broken source turns the
+**GitHub Actions run red**. Watch the Actions tab, or turn on GitHub's
+notifications for failed workflows to get an email. That is now the earliest
+warning that something upstream has changed.
 
 ### The output format will not change
 
@@ -222,9 +257,10 @@ No schema migration is needed - the tables are keyed on curve name.
 | `requirements.txt` | Dependencies for the hosted version only |
 | `config.json` | API key, tolerances and thresholds - edit here, not in the code. Gitignored |
 | `config.example.json` | Template committed in its place, with the key blank |
-| `run_daily.cmd` | What the scheduled task runs |
-| `install_task.ps1` | Registers/removes the scheduled task |
-| `open_app.cmd` | Starts the dashboard |
+| `run_daily.cmd` | Local daily update, if you ever re-enable the Windows task |
+| `install_task.ps1` | Registers/removes the Windows task (currently not registered) |
+| `open_app.cmd` | Starts the local dashboard |
+| `push_to_github.cmd` | Uploads to GitHub by command line, as an alternative to the web |
 | `update.log` | Rolling log of daily runs |
 | `tests/test_contract.py` | Format and resilience tests |
 | `tests/golden/` | Reference CSV exports the tests compare against |
