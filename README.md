@@ -6,7 +6,17 @@ A local database and dashboard for the base interest rates of our key markets.
 |---|---|---|---|---|
 | Philippines | PHP | BVAL | 1M, 3M, 6M, 1Y, 2Y, 3Y, 4Y, 5Y, 7Y, 10Y, 20Y, 25Y | 15 Aug 2022 |
 | Malaysia | MYR | KLIBOR | 1M, 3M, 6M (plus discontinued 2M, 9M, 12M) | 5 Jan 2007 |
+| Malaysia | MYR | MGS | 3Y, 5Y, 7Y, 10Y | Jan 2022 |
+| Malaysia | MYR | MGII (Islamic) | 3Y, 5Y, 7Y, 10Y | Jan 2022 |
 | United States | USD | SOFR | Overnight | 2 Apr 2018 |
+
+**MGS vs MGII, and which to use for Sukuk.** Both are Malaysian government
+paper published by BNM on the same page. MGS is conventional; **MGII
+(Government Investment Issues) is the Shariah-compliant one and is the correct
+benchmark for Sukuk.** They track each other closely, usually within a few
+basis points, and MGS is often used as a proxy because it is more liquid. Both
+are held here so you can price against the right one and see the spread. The
+stored figure is the **closing trading yield**.
 
 Everything runs on this machine. The fetcher, database and local dashboard use
 the Python standard library only, so there is nothing to `pip install` and no
@@ -204,7 +214,11 @@ python tests\test_contract.py
 |---|---|---|
 | BVAL | PDEx, `pds.com.ph` | GraphQL API, one request per trade date |
 | KLIBOR | Bank Negara Malaysia FMIP | Server-rendered table, parsed from HTML |
+| MGS / MGII | Bank Negara Malaysia FMIP | Benchmark yields page, one request per trade date, serving both curves |
 | SOFR | Federal Reserve Bank of New York | Public JSON API |
+
+MGS and MGII come from the same page, so one request fills both curves. The
+response is memoised per date to avoid fetching it twice.
 
 Rates are stored exactly as published - no interpolation, no adjustment, no
 business-day rolling. The number in the database is the number the source
@@ -225,6 +239,20 @@ printed.
   publication - it is normal, not an error.
 - **SOFR is published one business day in arrears**, so a 2-day age on the USD
   card is expected, not stale.
+- **A starred MGS or MGII yield means no trade occurred that day.** BNM still
+  publishes the close, so the value is stored and the marker stripped. It is an
+  indicative level rather than a traded one, which matters if you are quoting a
+  precise spread off a thin tenor.
+- **Only four MGS and MGII tenors are published** as official benchmarks: 3Y,
+  5Y, 7Y and 10Y. BNM's `ytm-matrix` and `indicative-yield-to-maturity` pages
+  carry a fuller curve if you ever need points in between; the schema already
+  allows 15Y, 20Y and 30Y in case BNM adds those benchmarks.
+- **MGS, MGII and KLIBOR carry the previous close on Malaysian public
+  holidays.** BNM returns a row for every weekday, repeating the last traded
+  level rather than leaving a gap. Verified: 1 May 2026 (Labour Day) returns
+  30 April's yields unchanged. So a flat stretch in the history may be a holiday
+  rather than a genuinely unchanged market, and MGS or MGII will never look
+  stale on a Malaysian holiday the way BVAL does on a Philippine one.
 - **CME Term SOFR (1M/3M/6M/12M) is deliberately not included.** Those are the
   forward-looking rates that appear in loan documentation, but they are
   licensed by CME and redistributing them in an internal tool likely needs a

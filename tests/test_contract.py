@@ -162,6 +162,92 @@ class TestKliborParsing(unittest.TestCase):
         self.assertEqual(sorted(t for _, t, _ in rows), ["1M", "3M"])
 
 
+MGS_TABLE = (
+    "<table><thead>"
+    "<th>Malaysian Government Securities (MGS) - Conventional</th>"
+    "<th>MGS Benchmarks</th><th>Trading Yields</th>"
+    "<th>Total Volume (MYR mil)</th><th>Daily change (bps)</th>"
+    "<th>Tenor</th><th>Maturity</th><th>Coupon (%)</th>"
+    "<th>Low (%)</th><th>High (%)</th><th>Close (%)</th>"
+    "</thead><tbody>"
+    "<tr><td>3Y</td><td>March 2029</td><td>3.24</td><td>3.34</td><td>3.35</td>"
+    "<td>3.34</td><td>254.54</td><td>0</td></tr>"
+    "<tr><td>5Y</td><td>June 2031</td><td>4.23</td><td>3.53*</td><td>3.55*</td>"
+    "<td>3.53*</td><td>-</td><td>-</td></tr>"
+    "</tbody></table>")
+
+# MGII has no Coupon column, so Close sits one place earlier.
+MGII_TABLE = (
+    "<table><thead>"
+    "<th>Malaysian Government Investment Issues (MGII) - Islamic</th>"
+    "<th>MGII Benchmarks</th><th>Trading Yields</th>"
+    "<th>Total Volume (MYR mil)</th><th>Daily change (bps)</th>"
+    "<th>Tenor</th><th>Maturity</th>"
+    "<th>Low (%)</th><th>High (%)</th><th>Close (%)</th>"
+    "</thead><tbody>"
+    "<tr><td>3Y</td><td>October 2029</td><td>3.35</td><td>3.35</td><td>3.35</td>"
+    "<td>440.00</td><td>-1</td></tr>"
+    "<tr><td>10Y</td><td>April 2035</td><td>3.73</td><td>3.75</td><td>3.75</td>"
+    "<td>191.94</td><td>3</td></tr>"
+    "</tbody></table>")
+
+
+class TestBenchmarkYieldParsing(unittest.TestCase):
+    """MGS and MGII share a page but have different column counts, so Close must
+    be located by header name rather than by position."""
+
+    def test_both_tables_parsed(self):
+        got = sources.parse_benchmark_yields(MGS_TABLE + MGII_TABLE)
+        self.assertEqual(dict(got["MGS"]), {"3Y": 3.34, "5Y": 3.53})
+        self.assertEqual(dict(got["MGII"]), {"3Y": 3.35, "10Y": 3.75})
+
+    def test_mgii_close_not_shifted_by_missing_coupon(self):
+        """The regression that matters. MGII lacks a Coupon column; reading Close
+        positionally from the MGS layout would return Low instead."""
+        got = sources.parse_benchmark_yields(MGII_TABLE)
+        self.assertEqual(dict(got["MGII"])["10Y"], 3.75,
+                         "MGII Close was misread - likely the Low column")
+
+    def test_asterisk_stripped(self):
+        """A starred yield means no trade occurred, but the close is still official."""
+        got = sources.parse_benchmark_yields(MGS_TABLE)
+        self.assertEqual(dict(got["MGS"])["5Y"], 3.53)
+
+    def test_reordered_columns_follow_the_header(self):
+        head = ("<table><thead>"
+                "<th>Malaysian Government Securities (MGS) - Conventional</th>"
+                "<th>Tenor</th><th>Close (%)</th><th>Low (%)</th><th>High (%)</th>"
+                "</thead><tbody>"
+                "<tr><td>3Y</td><td>3.34</td><td>3.30</td><td>3.40</td></tr>"
+                "</tbody></table>")
+        got = sources.parse_benchmark_yields(head)
+        self.assertEqual(dict(got["MGS"])["3Y"], 3.34,
+                         "reordered columns were misread")
+
+    def test_missing_close_column_raises(self):
+        head = ("<table><thead>"
+                "<th>Malaysian Government Securities (MGS) - Conventional</th>"
+                "<th>Tenor</th><th>Maturity</th>"
+                "</thead><tbody><tr><td>3Y</td><td>March 2029</td></tr></tbody></table>")
+        with self.assertRaises(sources.FetchError):
+            sources.parse_benchmark_yields(head)
+
+    def test_no_table_raises(self):
+        with self.assertRaises(sources.FetchError):
+            sources.parse_benchmark_yields("<html><body>Service unavailable</body></html>")
+
+    def test_dash_yields_skipped(self):
+        head = ("<table><thead>"
+                "<th>Malaysian Government Investment Issues (MGII) - Islamic</th>"
+                "<th>Tenor</th><th>Low (%)</th><th>High (%)</th><th>Close (%)</th>"
+                "</thead><tbody>"
+                "<tr><td>3Y</td><td>-</td><td>-</td><td>-</td></tr>"
+                "<tr><td>5Y</td><td>3.54</td><td>3.54</td><td>3.54</td></tr>"
+                "</tbody></table>")
+        got = sources.parse_benchmark_yields(head)
+        self.assertEqual(dict(got["MGII"]), {"5Y": 3.54})
+
+
 class TestValidation(unittest.TestCase):
 
     def test_accepts_good_data(self):

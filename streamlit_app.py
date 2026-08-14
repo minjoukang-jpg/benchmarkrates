@@ -140,15 +140,27 @@ for m in meta:
 
 # -- latest rates ----------------------------------------------------------
 st.subheader("Latest rates")
-cols = st.columns(len(meta))
-for col, m in zip(cols, meta):
+
+# Wrap into rows of three. One column per curve becomes unreadably narrow once
+# there are more than three or four curves.
+PER_ROW = 3
+rows_of_meta = [meta[i:i + PER_ROW] for i in range(0, len(meta), PER_ROW)]
+cards = []
+for chunk in rows_of_meta:
+    cols = st.columns(PER_ROW)          # pad the last row so widths stay even
+    cards.extend(zip(cols, chunk))
+
+for col, m in cards:
     with col:
         if not m["rows"]:
             st.metric(m["label"], "no data")
             continue
         latest = load_latest(m["curve"])
         rows = latest["rows"]
-        head = rows[min(2, len(rows) - 1)]
+        # 10Y is the conventionally quoted reference for government yield
+        # curves; otherwise fall back to a middle tenor.
+        head = next((r for r in rows if r["tenor"] == "10Y"),
+                    rows[min(2, len(rows) - 1)])
         change = head["change_bp"]
         st.metric(
             label=f"{m['label']} · {head['tenor']}",
@@ -185,7 +197,11 @@ curve_meta = labels[chosen_label]
 curve = curve_meta["curve"]
 
 live = curve_meta["active_tenors"] or curve_meta["tenors"]
-default = [t for t in ("3M", "1Y", "5Y", "10Y") if t in live] or live[:3]
+# A short curve fits entirely, so show all of it rather than a subset.
+if len(live) <= MAX_SERIES:
+    default = list(live)
+else:
+    default = [t for t in ("3M", "1Y", "5Y", "10Y") if t in live] or live[:3]
 
 with c2:
     tenors = st.multiselect(

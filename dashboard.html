@@ -311,7 +311,10 @@ function renderCards() {
 async function loadCardTable(m) {
   if (!m.rows) { $("tbl-" + m.curve).innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const d = await getJSON(`/api/latest?curve=${m.curve}`);
-  const head = d.rows[Math.min(2, d.rows.length - 1)];  // a mid tenor as the headline
+  // 10Y is the conventionally quoted reference for government yield curves;
+  // otherwise fall back to a middle tenor.
+  const head = d.rows.find(r => r.tenor === "10Y")
+            || d.rows[Math.min(2, d.rows.length - 1)];
   $("hero-" + m.curve).textContent = fmt(head.rate) + "%";
   $("herolbl-" + m.curve).textContent = `${head.tenor} · ${niceDate(d.date)}`;
 
@@ -400,7 +403,8 @@ const curveMeta = () => state.meta.find(m => m.curve === state.curve);
 function defaultTenors() {
   const m = curveMeta();
   const t = (m.active_tenors && m.active_tenors.length) ? m.active_tenors : m.tenors;
-  if (t.length <= 3) return t.slice();
+  // A short curve fits entirely, so show all of it rather than a subset.
+  if (t.length <= MAX_SERIES) return t.slice();
   const want = ["3M", "1Y", "5Y", "10Y"].filter(x => t.includes(x));
   return want.length >= 2 ? want : [t[0], t[Math.floor(t.length/2)], t[t.length-1]];
 }

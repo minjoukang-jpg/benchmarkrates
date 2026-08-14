@@ -28,6 +28,24 @@ CURVES = {
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-klibor",
     },
+    "MGS": {
+        "currency": "MYR",
+        "market": "Malaysia",
+        "label": "MYR MGS",
+        "description": "Malaysian Government Securities benchmark closing yields (conventional)",
+        "source": "Bank Negara Malaysia FMIP",
+        "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
+    },
+    "MGII": {
+        "currency": "MYR",
+        "market": "Malaysia",
+        "label": "MYR MGII (Islamic)",
+        "description": ("Malaysian Government Investment Issues benchmark closing yields. "
+                        "This is the Shariah-compliant benchmark, and the correct reference "
+                        "for Sukuk rather than conventional MGS"),
+        "source": "Bank Negara Malaysia FMIP",
+        "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
+    },
     "SOFR": {
         "currency": "USD",
         "market": "United States",
@@ -98,12 +116,29 @@ def connect_readonly(path=DB_PATH):
 
 def checkpoint(path=DB_PATH):
     """Fold the write-ahead log back into the main file and leave it in a form
-    that can be committed to git and read on a read-only host."""
+    that can be committed to git and read on a read-only host.
+
+    Switching out of WAL mode needs an exclusive lock, so it fails if anything
+    else has the database open - the local dashboard, typically. That is not
+    worth crashing over: the data is already committed either way, and the
+    journal-mode switch only matters before publishing the file. Returns True if
+    the mode was switched, False if something else held the database.
+    """
     conn = sqlite3.connect(path, timeout=30)
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    conn.execute("PRAGMA journal_mode=DELETE")
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")   # works alongside readers
+        conn.commit()
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE")
+            conn.commit()
+            return True
+        except sqlite3.OperationalError as exc:
+            print(f"  note: could not switch journal mode ({exc}). The data is "
+                  f"safely committed. Close the local dashboard and re-run if you "
+                  f"are about to publish rates.db.")
+            return False
+    finally:
+        conn.close()
 
 
 def init(path=DB_PATH):

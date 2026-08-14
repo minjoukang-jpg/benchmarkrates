@@ -56,6 +56,8 @@ KLIBOR_FALLBACK_TENORS = ["1M", "2M", "3M", "6M", "9M", "12M"]
 CURVE_TENORS = {
     "BVAL": {"1M", "3M", "6M", "1Y", "2Y", "3Y", "4Y", "5Y", "7Y", "10Y", "20Y", "25Y"},
     "KLIBOR": {"1M", "2M", "3M", "6M", "9M", "12M"},
+    "MGS": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
+    "MGII": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
     "SOFR": {"O/N"},
 }
 RATE_MIN, RATE_MAX = 0.0, 30.0
@@ -462,6 +464,149 @@ def fetch_klibor(start=None, end=None):
 
 
 # --------------------------------------------------------------------------
+# MYR MGS and MGII - BNM benchmark yields, one page per trade date
+#
+# MGS is the conventional government bond benchmark; MGII is the Islamic one
+# and is the correct reference for Sukuk. Both tables live on the same page, so
+# one request serves both curves and the result is memoised per date.
+# --------------------------------------------------------------------------
+
+BNM_BENCHMARK_URL = "https://financialmarkets.bnm.gov.my/benchmark-yields"
+
+# Column labels BNM uses in the leaf header row. MGS carries a Coupon column
+# and MGII does not, so the position of "Close" differs between the two tables.
+# Reading the order from the header is what keeps a 5Y yield from being stored
+# as a 7Y one if BNM ever adds or drops a column.
+_LEAF_HEADERS = ("tenor", "maturity", "coupon", "low", "high", "close")
+
+_TABLE_RE = re.compile(r"<table[^>]*>(.*?)</table>", re.S | re.I)
+_TENOR_CELL_RE = re.compile(r"^(\d{1,2})\s*Y$", re.I)
+
+_benchmark_cache = {}
+_BENCHMARK_CACHE_MAX = 400
+
+
+def _leaf_columns(thead_html):
+    """Ordered list of the leaf column names, e.g.
+    ['tenor','maturity','coupon','low','high','close'] for MGS."""
+    cells = [_clean(c).lower() for c in _TH_RE.findall(thead_html)]
+    out = []
+    for cell in cells:
+        for name in _LEAF_HEADERS:
+            if cell.startswith(name):
+                out.append(name)
+                break
+    return out
+
+
+def parse_benchmark_yields(html):
+    """Returns {"MGS": [(tenor, close_rate)], "MGII": [...]}.
+
+    Yields marked with an asterisk are BNM's indication that no actual trade
+    took place that day; the value is still the official close, so it is kept
+    and the marker stripped.
+    """
+    result = {}
+    for table_html in _TABLE_RE.findall(html):
+        head = _THEAD_RE.search(table_html)
+        if not head:
+            continue
+        head_text = _clean(head.group(1)).lower()
+
+        if "government investment issues" in head_text or "mgii" in head_text:
+            curve = "MGII"
+        elif "government securities" in head_text or "(mgs)" in head_text:
+            curve = "MGS"
+        else:
+            continue
+
+        cols = _leaf_columns(head.group(1))
+        if "close" not in cols or "tenor" not in cols:
+            raise FetchError(
+                f"BNM {curve} table header is missing a Tenor or Close column "
+                f"(found {cols}). The page layout has changed")
+        tenor_idx, close_idx = cols.index("tenor"), cols.index("close")
+
+        rows = []
+        for tr in _ROW_RE.findall(table_html):
+            cells = [_clean(c) for c in _CELL_RE.findall(tr)]
+            if len(cells) <= close_idx:
+                continue
+            tm = _TENOR_CELL_RE.match(cells[tenor_idx])
+            if not tm:
+                continue
+            tenor = f"{int(tm.group(1))}Y"
+            raw = cells[close_idx].replace("*", "").strip()
+            try:
+                rows.append((tenor, float(raw)))
+            except ValueError:
+                continue          # "-" means no yield published for that tenor
+        result[curve] = rows
+
+    if not result:
+        raise FetchError("No MGS or MGII table found on the BNM benchmark yields page")
+    return result
+
+
+def _benchmark_day(trade_date):
+    """Both curves for one date, memoised so MGS and MGII share one request."""
+    key = trade_date.isoformat()
+    if key in _benchmark_cache:
+        return _benchmark_cache[key]
+
+    body, status = _request(f"{BNM_BENCHMARK_URL}?date={key}", timeout=120)
+    if status >= 400:
+        raise FetchError(f"BNM returned HTTP {status} for benchmark yields on {key}")
+    parsed = parse_benchmark_yields(body)
+
+    if len(_benchmark_cache) >= _BENCHMARK_CACHE_MAX:
+        _benchmark_cache.clear()
+    _benchmark_cache[key] = parsed
+    return parsed
+
+
+def fetch_benchmark_day(curve, trade_date):
+    """One trade date for MGS or MGII. EMPTY on weekends and MY holidays."""
+    def strategy():
+        parsed = _benchmark_day(trade_date)
+        return [(trade_date.isoformat(), t, r) for t, r in parsed.get(curve, [])], False
+
+    out = _try_strategies([("bnm-benchmark-yields", strategy)])
+    if out.ok:
+        validate_rows(curve, out.rows)
+    return out
+
+
+def fetch_benchmark_range(curve, start, end, pause=0.3, on_progress=None):
+    """Probe each weekday in [start, end], as with BVAL. Weekdays that come back
+    empty are non-publication days; weekdays that error are recorded separately."""
+    rows, no_pub, failures = [], [], []
+    day = start
+    while day <= end:
+        if day.weekday() < 5:
+            out = fetch_benchmark_day(curve, day)
+            if out.ok:
+                rows.extend(out.rows)
+            elif out.status == EMPTY:
+                no_pub.append(day.isoformat())
+            else:
+                failures.append(f"{day}: {out.detail}")
+            if on_progress:
+                on_progress(day, len(out.rows), out.status)
+            time.sleep(pause)
+        day += datetime.timedelta(days=1)
+
+    if failures and not rows:
+        return Outcome(FAILED, [], None, f"every requested day failed. First: {failures[0]}")
+    detail = f"{len(no_pub)} weekday(s) with no publication"
+    if failures:
+        detail += f"; {len(failures)} day(s) errored (first: {failures[0]})"
+    if not rows:
+        return Outcome(EMPTY, [], "bnm-benchmark-yields", detail)
+    return Outcome(OK, rows, "bnm-benchmark-yields", detail)
+
+
+# --------------------------------------------------------------------------
 # USD SOFR - NY Fed public API
 # --------------------------------------------------------------------------
 
@@ -530,16 +675,19 @@ def probe(curve):
         return fetch_sofr(today - datetime.timedelta(days=10), today)
     if curve == "KLIBOR":
         return fetch_klibor(today - datetime.timedelta(days=10), today)
-    if curve == "BVAL":
+    if curve in ("BVAL", "MGS", "MGII"):
         # Walk back to the most recent weekday that published, so a probe run
         # on a Monday morning or a holiday does not look like a failure.
+        fetch = (fetch_bval_day if curve == "BVAL"
+                 else lambda d: fetch_benchmark_day(curve, d))
+        label = "pdex-graphql" if curve == "BVAL" else "bnm-benchmark-yields"
         day, checked = today, 0
         while checked < 7:
             if day.weekday() < 5:
-                out = fetch_bval_day(day)
+                out = fetch(day)
                 if out.ok or out.failed:
                     return out
                 checked += 1
             day -= datetime.timedelta(days=1)
-        return Outcome(EMPTY, [], "pdex-graphql", "no publication in the last 7 weekdays")
+        return Outcome(EMPTY, [], label, "no publication in the last 7 weekdays")
     raise ValueError(f"unknown curve {curve}")

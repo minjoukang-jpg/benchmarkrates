@@ -20,6 +20,11 @@ LOOKBACK_DAYS = int(CFG.get("lookback_days", 45))
 
 BVAL_HISTORY_START = datetime.date(2022, 1, 1)
 SOFR_HISTORY_START = datetime.date(2018, 4, 1)
+# BNM's benchmark-yields page serves a date parameter at least this far back.
+BENCHMARK_HISTORY_START = datetime.date(2022, 1, 1)
+
+# Curves fetched one trade date at a time, so a backfill walks weekdays.
+PER_DAY_CURVES = ("BVAL", "MGS", "MGII")
 
 
 def _out(msg=""):
@@ -47,11 +52,11 @@ def _fetch(conn, curve, full):
             return sources.fetch_klibor(), None
         return sources.fetch_klibor(today - datetime.timedelta(days=LOOKBACK_DAYS), today), None
 
-    if curve == "BVAL":
+    if curve in PER_DAY_CURVES:
         if full:
-            start = BVAL_HISTORY_START
+            start = BVAL_HISTORY_START if curve == "BVAL" else BENCHMARK_HISTORY_START
         else:
-            last = db.latest_date(conn, "BVAL")
+            last = db.latest_date(conn, curve)
             start = (datetime.date.fromisoformat(last) + datetime.timedelta(days=1)) if last \
                 else today - datetime.timedelta(days=LOOKBACK_DAYS)
         if start > today:
@@ -61,7 +66,9 @@ def _fetch(conn, curve, full):
             if full:
                 _out(f"    {day} -> {n} tenors ({status})")
 
-        return sources.fetch_bval_range(start, today, on_progress=progress), None
+        if curve == "BVAL":
+            return sources.fetch_bval_range(start, today, on_progress=progress), None
+        return sources.fetch_benchmark_range(curve, start, today, on_progress=progress), None
 
     raise ValueError(f"unknown curve {curve}")
 
@@ -275,6 +282,13 @@ def _hint(curve, detail):
             return ("BNM changed the page layout. Open the URL above, view source, and check "
                     "the <thead>/<tr> structure against parse_klibor_html() in sources.py.")
         return "Open the BNM URL above in a browser. If it loads, the parser needs updating."
+    if curve in ("MGS", "MGII"):
+        if "header" in d or "no mgs or mgii" in d:
+            return ("BNM changed the benchmark yields layout. Open the URL above and check the "
+                    "table headers against parse_benchmark_yields() in sources.py. It reads the "
+                    "Tenor and Close columns by name, so a renamed header is the likely cause.")
+        return ("Open the BNM URL above in a browser with ?date=YYYY-MM-DD. If it loads, the "
+                "parser needs updating.")
     if curve == "SOFR":
         return ("All three NY Fed endpoints failed, which usually means the network or the "
                 "corporate proxy rather than the API. Check "
