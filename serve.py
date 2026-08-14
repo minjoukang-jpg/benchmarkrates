@@ -279,7 +279,7 @@ def main():
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    db.init()  # make sure the schema exists even on a fresh checkout
+    db.ensure_database()  # rebuild from data/ if rates.db is not there
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{args.port}"
     print(f"Rates database running at {url}")

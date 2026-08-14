@@ -139,8 +139,15 @@ Two representations, and it matters which is which:
 - **`data/*.csv` is the source of truth in the repository.** One file per curve,
   wide format, the same format the download button produces.
 - **`rates.db` is a local build artefact.** It is gitignored and rebuilt from the
-  CSVs on demand. A fresh checkout has no database until you run
-  `python cli.py rebuild`.
+  CSVs automatically. Every entry point calls `db.ensure_database()`, so
+  `cli.py`, the local dashboard and the hosted app all just work on a fresh
+  checkout with no database present. `python cli.py rebuild` forces it
+  explicitly if you want to.
+
+**You can delete `rates.db` whenever you like.** It regenerates in about a
+quarter of a second. Deleting it before uploading to GitHub is the simplest way
+to make sure a 10 MB binary never gets dragged into a web upload, which is how it
+got corrupted before. Note that running the local dashboard recreates it.
 
 The hosted app builds the database in memory at startup from the CSVs, which
 takes about a quarter of a second for 49,000 observations.

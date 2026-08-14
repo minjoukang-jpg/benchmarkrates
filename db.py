@@ -328,6 +328,22 @@ def csv_files_present(data_dir=DATA_DIR):
                 and [f for f in os.listdir(data_dir) if f.endswith(".csv")])
 
 
+def ensure_database(path=DB_PATH, data_dir=DATA_DIR):
+    """Return a connection, rebuilding from data/ if the database is absent.
+
+    rates.db is a build artefact, not something to keep around: it is gitignored,
+    and leaving a 10 MB binary in the folder invites it being dragged into a web
+    upload, where it arrives corrupted. Rebuilding takes about a quarter of a
+    second, so the file can simply be deleted and regenerated on demand.
+    """
+    missing = not os.path.exists(path)
+    conn = init(path)
+    empty = not conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
+    if (missing or empty) and csv_files_present(data_dir):
+        read_csv_files(conn, data_dir)
+    return conn
+
+
 # --------------------------------------------------------------------------
 # Health checks
 # --------------------------------------------------------------------------

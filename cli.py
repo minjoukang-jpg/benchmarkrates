@@ -156,7 +156,7 @@ def update_curve(conn, curve, full=False, force=False, quiet=False):
 # --------------------------------------------------------------------------
 
 def cmd_update(args):
-    conn = db.init()
+    conn = db.ensure_database()
     curves = [args.curve] if args.curve else list(db.CURVES)
     _out(f"Rates update  {datetime.datetime.now():%Y-%m-%d %H:%M}")
     total, failed = 0, 0
@@ -171,7 +171,7 @@ def cmd_update(args):
 
 
 def cmd_backfill(args):
-    conn = db.init()
+    conn = db.ensure_database()
     curves = [args.curve] if args.curve else list(db.CURVES)
     _out("Historical backfill (this takes a few minutes for BVAL)")
     for curve in curves:
@@ -183,7 +183,7 @@ def cmd_backfill(args):
 
 def cmd_export(args):
     """Write the database out to the CSV files that get committed."""
-    conn = db.init()
+    conn = db.ensure_database()
     written = db.write_csv_files(conn)
     _out(f"Wrote CSV seed files to {db.DATA_DIR}")
     for curve, n in written.items():
@@ -200,7 +200,7 @@ def cmd_rebuild(args):
     committed - the CSVs are. Rebuilding first means the anomaly guard still has
     history to compare incoming data against.
     """
-    conn = db.init()
+    conn = db.ensure_database()
     if not db.csv_files_present():
         _out(f"No CSV files found in {db.DATA_DIR}. Nothing to rebuild from.")
         return 1
@@ -214,7 +214,7 @@ def cmd_rebuild(args):
 
 
 def cmd_status(args):
-    conn = db.init()
+    conn = db.ensure_database()
     today = datetime.date.today()
     _out(f"{'Curve':<9}{'Tenors':>7}{'Rows':>9}  {'First':<12}{'Last':<12}{'Age':<7}Last run")
     _out("-" * 78)
@@ -243,7 +243,7 @@ def cmd_status(args):
 
 def cmd_doctor(args):
     """Diagnose sources that have stopped working."""
-    conn = db.init()
+    conn = db.ensure_database()
     curves = [args.curve] if args.curve else list(db.CURVES)
     _out(f"Rates doctor  {datetime.datetime.now():%Y-%m-%d %H:%M}")
     _out("=" * 78)
