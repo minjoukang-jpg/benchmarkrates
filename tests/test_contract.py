@@ -312,5 +312,76 @@ class TestMissedWeekdays(unittest.TestCase):
         self.assertGreater(db.missed_weekdays(conn, "BVAL", datetime.date(2026, 9, 1)), 3)
 
 
+class TestThreadSafety(unittest.TestCase):
+    """The hosted dashboard reruns its script on a different thread every time a
+    widget changes. A connection shared across those threads raises
+    sqlite3.ProgrammingError, which is what happened when a tenor was removed
+    from the selector. Connections must therefore be opened per call."""
+
+    def setUp(self):
+        self.path = os.path.join(GOLDEN, "_threadtest.db")
+        if os.path.exists(self.path):
+            os.remove(self.path)
+        conn = db.init(self.path)
+        db.upsert_rates(conn, "SOFR", [("2026-08-12", "O/N", 3.62),
+                                       ("2026-08-11", "O/N", 3.64)])
+        conn.close()
+        db.checkpoint(self.path)
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            p = self.path + suffix
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    def test_shared_connection_across_threads_fails(self):
+        """Documents why the app must not cache a connection."""
+        import threading
+        conn = db.connect_readonly(self.path)
+        captured = {}
+
+        def worker():
+            try:
+                serve.get_latest(conn, "SOFR")
+                captured["err"] = None
+            except Exception as exc:            # noqa: BLE001
+                captured["err"] = exc
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        conn.close()
+        self.assertIsInstance(captured["err"], sqlite3.ProgrammingError,
+                              "if this stops raising, sqlite changed and the "
+                              "per-call connection rule can be revisited")
+
+    def test_per_call_connection_works_across_threads(self):
+        """The pattern streamlit_app.py actually uses."""
+        import threading
+        results, errors = [], []
+
+        def worker():
+            try:
+                conn = db.connect_readonly(self.path)
+                try:
+                    results.append(serve.get_latest(conn, "SOFR")["date"])
+                finally:
+                    conn.close()
+            except Exception as exc:            # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], "per-call connections must work from any thread")
+        self.assertEqual(results, ["2026-08-12"] * 6)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

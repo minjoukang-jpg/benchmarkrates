@@ -13,6 +13,7 @@ particular the download button reuses export_csv, which the contract tests pin
 byte-for-byte.
 """
 
+import contextlib
 import datetime
 import os
 
@@ -47,34 +48,51 @@ st.set_page_config(page_title="Benchmark Rates", page_icon="chart_with_upwards_t
 # Data
 # --------------------------------------------------------------------------
 
-@st.cache_resource
-def get_conn():
-    return db.connect_readonly(DB_PATH)
+@contextlib.contextmanager
+def _conn():
+    """A connection scoped to a single query.
+
+    Do not cache the connection with st.cache_resource. Streamlit reruns the
+    script on a different thread whenever a widget changes, and SQLite refuses
+    to reuse a connection across threads, so a cached connection raises
+    ProgrammingError the moment anyone touches a control. Connections are cheap
+    and the results are cached below, so the database is barely touched.
+    """
+    conn = db.connect_readonly(DB_PATH)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @st.cache_data(ttl=900)
 def load_meta():
-    return serve.get_meta(get_conn())
+    with _conn() as c:
+        return serve.get_meta(c)
 
 
 @st.cache_data(ttl=900)
 def load_latest(curve):
-    return serve.get_latest(get_conn(), curve)
+    with _conn() as c:
+        return serve.get_latest(c, curve)
 
 
 @st.cache_data(ttl=900)
 def load_series(curve, tenors, start, end):
-    return serve.get_series(get_conn(), curve, list(tenors), start, end)
+    with _conn() as c:
+        return serve.get_series(c, curve, list(tenors), start, end)
 
 
 @st.cache_data(ttl=900)
 def load_shape(curve, date):
-    return serve.get_curve_shape(get_conn(), curve, date)
+    with _conn() as c:
+        return serve.get_curve_shape(c, curve, date)
 
 
 @st.cache_data(ttl=900)
 def load_csv(curve, start, end):
-    return serve.export_csv(get_conn(), curve, start, end)
+    with _conn() as c:
+        return serve.export_csv(c, curve, start, end)
 
 
 def palette():
