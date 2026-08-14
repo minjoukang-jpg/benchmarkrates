@@ -108,8 +108,34 @@ python cli.py doctor                   # diagnose a source that stopped working
 python cli.py update                   # same job the scheduler runs
 python cli.py update --curve SOFR      # one source only
 python cli.py backfill --curve BVAL    # re-pull full history (slow for BVAL)
+python cli.py export                   # write data/*.csv from the database
+python cli.py rebuild                  # rebuild the database from data/*.csv
 python tests\test_contract.py          # check nothing has drifted
 ```
+
+## How the data is stored
+
+Two representations, and it matters which is which:
+
+- **`data/*.csv` is the source of truth in the repository.** One file per curve,
+  wide format, the same format the download button produces.
+- **`rates.db` is a local build artefact.** It is gitignored and rebuilt from the
+  CSVs on demand. A fresh checkout has no database until you run
+  `python cli.py rebuild`.
+
+The hosted app builds the database in memory at startup from the CSVs, which
+takes about a quarter of a second for 49,000 observations.
+
+**Why not just commit `rates.db`?** It was tried and it broke. A 9 MB SQLite
+binary pushed through GitHub's web uploader arrived corrupted, and the app died
+with `sqlite3.DatabaseError` on its first query. Text survives git and browser
+uploads intact, is a twentieth of the size (0.4 MB against 8.6 MB), and can be
+diffed so you can see what a daily update actually changed. The round trip is
+covered by tests that assert it is exactly lossless, including that an empty cell
+stays empty rather than becoming a zero.
+
+After changing data locally, run `python cli.py export` before committing, or the
+repository will still hold the old numbers.
 
 ## When a source changes or breaks
 
@@ -273,7 +299,8 @@ No schema migration is needed - the tables are keyed on curve name.
 
 | File | Purpose |
 |---|---|
-| `rates.db` | SQLite database (the actual data) |
+| `data/*.csv` | **The committed data**, one file per curve. This is the source of truth in the repository |
+| `rates.db` | Local SQLite build, rebuilt from `data/` with `cli.py rebuild`. Not committed |
 | `db.py` | Schema, curve registry, storage helpers |
 | `sources.py` | One fetcher per benchmark |
 | `cli.py` | `update` / `backfill` / `status` |

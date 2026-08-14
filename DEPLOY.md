@@ -43,10 +43,21 @@ git push -u origin main
 ```
 
 To upload through the browser instead: **Add file > Upload files**, select
-everything in `C:\Users\MJkang\rates-db`, drag it in, and commit. Check
-afterwards that the `.github` folder arrived, since some browsers drop folders
-whose name starts with a dot, and `.github/workflows/daily-update.yml` is what
-runs the daily update.
+everything in `C:\Users\MJkang\rates-db`, drag it in, and commit.
+
+Two things to check afterwards:
+
+- The **`.github`** folder arrived, with `workflows/daily-update.yml` inside it.
+  Some browsers drop folders whose name starts with a dot, and that file is what
+  runs the daily update.
+- The **`data`** folder arrived, with five CSV files in it. That is the actual
+  rate data. Without it the app has nothing to show.
+
+**Do not upload `rates.db`.** It is gitignored deliberately. It is a local build
+artefact, and pushing a 9 MB SQLite binary through the web uploader corrupts it -
+the app then fails with `sqlite3.DatabaseError` on its first query. If a
+`rates.db` is already sitting in the repository from an earlier attempt, delete
+it there.
 
 ## Step 2: add the PDEx key as a GitHub secret
 
