@@ -102,7 +102,8 @@ class TestOutputContract(unittest.TestCase):
             self.assertIn(key, meta, f"/api/meta lost the '{key}' field")
 
         latest = serve.get_latest(conn, "SOFR")
-        self.assertEqual(set(latest), {"curve", "date", "rows"})
+        for key in ("curve", "date", "rows", "headline"):
+            self.assertIn(key, latest, f"/api/latest lost the '{key}' field")
         for key in ("tenor", "rate", "prev_rate", "prev_date", "change_bp"):
             self.assertIn(key, latest["rows"][0])
 
@@ -531,6 +532,36 @@ class TestCsvRoundTrip(unittest.TestCase):
                 "SELECT curve, rate_date, tenor, rate FROM rates ORDER BY rate_date, tenor")],
             [tuple(r) for r in b.execute(
                 "SELECT curve, rate_date, tenor, rate FROM rates ORDER BY rate_date, tenor")])
+
+
+class TestHeadlineTenor(unittest.TestCase):
+    """The big figure on each card is declared per curve, not inferred."""
+
+    def test_declared_tenor_is_used(self):
+        self.assertEqual(
+            db.headline_tenor("BVAL", ["1M", "3M", "5Y", "10Y", "25Y"]), "5Y")
+        self.assertEqual(db.headline_tenor("MGS", ["3Y", "5Y", "7Y", "10Y"]), "10Y")
+        self.assertEqual(db.headline_tenor("KLIBOR", ["1M", "3M", "6M"]), "6M")
+        self.assertEqual(db.headline_tenor("SOFR", ["O/N"]), "O/N")
+
+    def test_every_curve_declares_one(self):
+        for curve, meta in db.CURVES.items():
+            self.assertIn("headline_tenor", meta,
+                          f"{curve} has no declared headline tenor")
+
+    def test_declared_tenor_is_valid_for_its_curve(self):
+        for curve, meta in db.CURVES.items():
+            allowed = sources.CURVE_TENORS.get(curve)
+            if allowed:
+                self.assertIn(meta["headline_tenor"], allowed,
+                              f"{curve} headline tenor is not one it publishes")
+
+    def test_falls_back_when_not_published_that_day(self):
+        """A discontinued or unpublished tenor must not blank the card."""
+        self.assertEqual(db.headline_tenor("BVAL", ["1M", "3M", "6M"]), "6M")
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(db.headline_tenor("BVAL", []))
 
 
 class TestThreadSafety(unittest.TestCase):

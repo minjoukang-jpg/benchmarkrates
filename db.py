@@ -27,6 +27,7 @@ CURVES = {
         "description": "Bloomberg Valuation benchmark tenors for PHP government securities",
         "source": "PDEx (pds.com.ph)",
         "url": "https://www.pds.com.ph/",
+        "headline_tenor": "5Y",
     },
     "KLIBOR": {
         "currency": "MYR",
@@ -35,6 +36,9 @@ CURVES = {
         "description": "Kuala Lumpur Interbank Offered Rate",
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-klibor",
+        # 6M as before. Change to "3M" if you would rather it sit alongside the
+        # MYOR 3M card, which makes the KLIBOR-to-MYOR gap visible at a glance.
+        "headline_tenor": "6M",
     },
     "MYOR": {
         "currency": "MYR",
@@ -44,6 +48,7 @@ CURVES = {
                         "transitioning to from KLIBOR, with compounded 1M, 3M and 6M averages"),
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-myor",
+        "headline_tenor": "3M",
     },
     "MYORI": {
         "currency": "MYR",
@@ -53,11 +58,13 @@ CURVES = {
                         "based on Islamic money market transactions"),
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-myori",
+        "headline_tenor": "3M",
     },
     "MGS": {
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGS",
+        "headline_tenor": "10Y",
         "description": "Malaysian Government Securities benchmark closing yields (conventional)",
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
@@ -66,6 +73,7 @@ CURVES = {
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGII (Islamic)",
+        "headline_tenor": "10Y",
         "description": ("Malaysian Government Investment Issues benchmark closing yields. "
                         "This is the Shariah-compliant benchmark, and the correct reference "
                         "for Sukuk rather than conventional MGS"),
@@ -79,6 +87,7 @@ CURVES = {
         "description": "Secured Overnight Financing Rate (overnight, published rate)",
         "source": "Federal Reserve Bank of New York",
         "url": "https://markets.newyorkfed.org/api/rates/secured/sofr/last/1.json",
+        "headline_tenor": "O/N",
     },
 }
 
@@ -222,6 +231,23 @@ def latest_date(conn, curve):
 
 def tenor_sort_key(tenor):
     return TENOR_MONTHS.get(tenor, 9999)
+
+
+def headline_tenor(curve, available):
+    """Which tenor to show as the big figure on a curve's card.
+
+    Declared per curve as "headline_tenor" in CURVES so the choice is explicit
+    and in one place, rather than inferred. Falls back to a middle tenor if the
+    preferred one was not published on the latest date.
+    """
+    tenors = list(available or [])
+    if not tenors:
+        return None
+    preferred = CURVES.get(curve, {}).get("headline_tenor")
+    if preferred and preferred in tenors:
+        return preferred
+    ordered = sorted(tenors, key=tenor_sort_key)
+    return ordered[min(2, len(ordered) - 1)]
 
 
 # --------------------------------------------------------------------------

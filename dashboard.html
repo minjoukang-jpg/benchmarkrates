@@ -311,10 +311,9 @@ function renderCards() {
 async function loadCardTable(m) {
   if (!m.rows) { $("tbl-" + m.curve).innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const d = await getJSON(`/api/latest?curve=${m.curve}`);
-  // 10Y is the conventionally quoted reference for government yield curves;
-  // otherwise fall back to a middle tenor.
-  const head = d.rows.find(r => r.tenor === "10Y")
-            || d.rows[Math.min(2, d.rows.length - 1)];
+  // Which tenor headlines the card is declared per curve in db.CURVES and
+  // resolved by the API, so both dashboards agree.
+  const head = d.rows.find(r => r.tenor === d.headline) || d.rows[0];
   $("hero-" + m.curve).textContent = fmt(head.rate) + "%";
   $("herolbl-" + m.curve).textContent = `${head.tenor} · ${niceDate(d.date)}`;
 

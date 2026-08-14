@@ -105,7 +105,10 @@ def get_latest(conn, curve):
             "change_bp": round((r["rate"] - prev["rate"]) * 100, 1) if prev else None,
         })
     rows.sort(key=lambda x: db.tenor_sort_key(x["tenor"]))
-    return {"curve": curve, "date": last, "rows": rows}
+    return {"curve": curve, "date": last, "rows": rows,
+            # Resolved server-side so the local and hosted dashboards always
+            # show the same headline figure.
+            "headline": db.headline_tenor(curve, [r["tenor"] for r in rows])}
 
 
 def get_series(conn, curve, tenors, start, end):

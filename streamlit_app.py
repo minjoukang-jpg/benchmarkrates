@@ -209,10 +209,9 @@ for col, m in cards:
             continue
         latest = load_latest(m["curve"])
         rows = latest["rows"]
-        # 10Y is the conventionally quoted reference for government yield
-        # curves; otherwise fall back to a middle tenor.
-        head = next((r for r in rows if r["tenor"] == "10Y"),
-                    rows[min(2, len(rows) - 1)])
+        # Which tenor headlines the card is declared per curve in db.CURVES and
+        # resolved by get_latest, so both dashboards agree.
+        head = next((r for r in rows if r["tenor"] == latest["headline"]), rows[0])
         change = head["change_bp"]
         st.metric(
             label=f"{m['label']} · {head['tenor']}",
