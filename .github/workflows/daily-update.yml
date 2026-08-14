@@ -32,6 +32,12 @@ jobs:
         run: python cli.py rebuild
 
       - name: Fetch the latest rates
+        id: fetch
+        # continue-on-error matters: cli.py exits non-zero if ANY source fails,
+        # and without this the job would stop here, so a single network blip on
+        # one source would discard the other six curves' data for that day. The
+        # run is still marked failed by the gate step at the end.
+        continue-on-error: true
         env:
           PDEX_API_KEY: ${{ secrets.PDEX_API_KEY }}
         run: python cli.py update
@@ -53,9 +59,21 @@ jobs:
             echo "No new rates today (weekend, public holiday, or already current)."
           else
             git commit -m "Rates update $(date -u +%Y-%m-%d)"
-            git push
+            # Another run or a manual edit may have landed first; rebase onto it
+            # rather than failing outright.
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
       - name: Report source health
         if: always()
         run: python cli.py status
+
+      - name: Fail the run if a source failed
+        # Whatever succeeded has been committed by now. This turns the run red
+        # so the failure is visible and notifies you, rather than passing quietly.
+        if: steps.fetch.outcome == 'failure'
+        run: |
+          echo "::error::One or more sources failed. Data from the healthy sources"
+          echo "::error::was still saved. Run 'python cli.py doctor' locally to diagnose."
+          exit 1
