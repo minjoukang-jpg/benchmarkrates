@@ -1,0 +1,18 @@
+{
+  "_comment": "Copy this to config.json and fill in the key. config.json is gitignored so the key is never committed. When hosted, set PDEX_API_KEY as a secret instead and leave this blank.",
+
+  "pdex_api_key": "",
+  "_pdex_api_key_help": "Open https://www.pds.com.ph/wd-mp/php-bval-reference-rate-benchmark-tenors in Chrome, press F12, open the Network tab, reload, click the request to /api-mp/graphql/ and copy the value after 'APIKey ' in the Authorization request header.",
+
+  "lookback_days": 45,
+
+  "anomaly_min_overlap": 20,
+  "anomaly_change_bp": 25,
+  "anomaly_max_fraction": 0.30,
+
+  "missed_weekdays_before_alarm": {
+    "BVAL": 3,
+    "KLIBOR": 3,
+    "SOFR": 4
+  }
+}

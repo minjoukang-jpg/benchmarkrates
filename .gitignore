@@ -1,0 +1,17 @@
+# SQLite sidecar files. rates.db itself IS committed - it is the data the
+# hosted dashboard reads - but the write-ahead log and shared-memory files are
+# transient and must never be committed.
+rates.db-wal
+rates.db-shm
+rates.db-journal
+
+# Local run artefacts
+update.log
+bval_backfill.log
+__pycache__/
+*.pyc
+
+# Never commit the PDEx API key. On GitHub it comes from Actions secrets, on
+# Streamlit Cloud from app secrets. See DEPLOY.md.
+config.json
+.streamlit/secrets.toml

@@ -1,0 +1,230 @@
+# Benchmark Rates Database
+
+A local database and dashboard for the base interest rates of our key markets.
+
+| Market | Currency | Benchmark | Tenors held | History from |
+|---|---|---|---|---|
+| Philippines | PHP | BVAL | 1M, 3M, 6M, 1Y, 2Y, 3Y, 4Y, 5Y, 7Y, 10Y, 20Y, 25Y | 15 Aug 2022 |
+| Malaysia | MYR | KLIBOR | 1M, 3M, 6M (plus discontinued 2M, 9M, 12M) | 5 Jan 2007 |
+| United States | USD | SOFR | Overnight | 2 Apr 2018 |
+
+Everything runs on this machine. The fetcher, database and local dashboard use
+the Python standard library only, so there is nothing to `pip install` and no
+admin rights are needed.
+
+There is also a **hosted version** for sharing with colleagues: `streamlit_app.py`
+runs on Streamlit Cloud with GitHub Actions doing the daily fetch, so no laptop
+needs to be on. It reads the same database and reuses the same data-access code,
+so the two dashboards cannot drift apart. See [DEPLOY.md](DEPLOY.md) for the
+steps and the trade-offs, including the data-governance question about hosting
+outside the ib vogt tenant. The hosted version needs `pip install -r
+requirements.txt`; the local one does not.
+
+## Daily use
+
+Double-click **`open_app.cmd`**, or run:
+
+```bash
+python serve.py
+```
+
+The dashboard opens at <http://127.0.0.1:8765>. It binds to loopback only, so
+it is not reachable from the network. Close the console window to stop it.
+
+The dashboard gives you:
+
+- **Latest rates per market** with the change in basis points against the
+  previous publication date, and an age badge that turns red if a source stops
+  updating.
+- **History** - any tenor over 1M to Max, hover for values on a date, with a
+  table view and CSV export (wide format, one column per tenor, paste-ready).
+- **Term structure** - the latest curve against an earlier date, to show how
+  the shape has moved.
+- **Refresh now** - runs the same update the scheduled job runs.
+
+## Automatic daily updates
+
+A Windows scheduled task, **"Benchmark Rates Daily Update"**, runs
+`run_daily.cmd` at **08:15 on weekdays**. If the laptop is off at that time the
+task runs at the next opportunity. Output is appended to `update.log`.
+
+```bash
+powershell -ExecutionPolicy Bypass -File install_task.ps1 -Time 09:00
+```
+
+Re-run with a different `-Time` to reschedule, or `-Remove` to delete the task.
+
+The update is **idempotent** - running it twice writes nothing the second time,
+and it re-checks the previous 45 days each run so a late publication or a
+revision is picked up rather than missed permanently.
+
+## Command line
+
+```bash
+python cli.py status                   # coverage and last-run summary
+python cli.py doctor                   # diagnose a source that stopped working
+python cli.py update                   # same job the scheduler runs
+python cli.py update --curve SOFR      # one source only
+python cli.py backfill --curve BVAL    # re-pull full history (slow for BVAL)
+python tests\test_contract.py          # check nothing has drifted
+```
+
+## When a source changes or breaks
+
+These are public websites and APIs. They will change without warning, so the
+app is built to fail in a way you can act on rather than to fail silently.
+
+### Empty is not the same as broken
+
+This is the distinction the whole design turns on. Every fetch ends in one of
+three states:
+
+| State | Meaning | Alerts? |
+|---|---|---|
+| OK | Data returned and passed validation | No |
+| EMPTY | Source answered correctly, published nothing | No |
+| FAILED | Unreachable, unparsable, or failed validation | Yes |
+
+BVAL is legitimately EMPTY every weekend, on every PH public holiday, and each
+morning before PDEx releases. Treating that as an error would cry wolf daily,
+so it is logged as `no_publication` and stays silent.
+
+To catch a source that has genuinely gone quiet without needing a holiday
+calendar, the app counts **consecutive weekdays with no data** and only alarms
+past a per-source tolerance (3 for BVAL and KLIBOR, 4 for SOFR because it
+publishes a day in arrears). A weekend never counts. A two-day holiday does not
+breach the tolerance. A source that has actually stopped does, within a week.
+
+### Fallback paths
+
+If the usual route fails, each source tries alternatives before giving up, and
+the log records which route was used, so a silent fallback is never invisible.
+
+| Curve | Primary | Fallbacks |
+|---|---|---|
+| SOFR | `search.json` for the date range | `last/N.json`, then `all/latest.json` |
+| KLIBOR | Date-range query | Full table, filtered locally |
+| BVAL | PDEx GraphQL | None available (see below) |
+
+BVAL has no fallback because PDEx requires an API key that is not exposed on
+any public page, so it cannot be rediscovered automatically. Instead the key
+lives in `config.json` and the app tells the difference between causes: HTTP
+401 means the key rotated and prints the exact steps to get a new one, while a
+missing `bvalRates` field means the GraphQL schema changed.
+
+### Guards against wrong data
+
+A source that breaks loudly is easy. The dangerous case is one that returns
+HTTP 200 with the wrong numbers. Three defences, in order of importance:
+
+1. **Header-driven parsing.** KLIBOR columns are mapped from BNM's own
+   `<thead>` labels, not from position. If BNM reorders, adds, or removes a
+   tenor column, values still land on the right tenor. If the header vanishes
+   the app falls back to the documented order but flags the run as degraded.
+2. **Validation.** Every row is checked before it is stored: the tenor must be
+   one this curve actually has, the rate must be a plausible percentage
+   (0 to 30), and the date must parse and not be in the future. A source that
+   switched from percent to basis points is refused, not stored.
+3. **Anomaly guard.** Each run re-fetches the previous 45 days, so most
+   incoming rows should already match what is stored. If more than 30% of that
+   overlap disagrees by more than 25bp, the write is blocked and reported
+   rather than overwriting good history. Override with `--force` once you have
+   confirmed the new values are right. Thresholds are in `config.json`.
+
+**Known limit of the anomaly guard:** it cannot detect a swap between two
+tenors whose rates are nearly equal. KLIBOR 3M and 6M currently sit 3bp apart,
+so swapping those columns would move the numbers too little for any threshold
+to notice. Defence 1 is what actually prevents that, which is why parsing is
+driven off the header. This is deliberate and is covered by a test.
+
+### If something does break
+
+The dashboard shows a red banner naming the source, the last error, and the
+command to run. Nothing is hidden and stored data is never discarded, so the
+last good values keep showing while a source is down.
+
+```bash
+python cli.py doctor
+```
+
+`doctor` probes each source live, reports which strategy worked, what came
+back, and for a failure prints a specific fix rather than a stack trace. The
+scheduled task also exits non-zero on failure, so **Task Scheduler's
+`LastTaskResult`** is 1 when something needs attention.
+
+### The output format will not change
+
+`tests/test_contract.py` pins the CSV export byte-for-byte against golden
+fixtures in `tests/golden/`, along with the database columns, the primary key,
+and the API response keys. If a future change would alter the CSV structure the
+tests fail. Run them after any edit:
+
+```bash
+python tests\test_contract.py
+```
+
+## Where the data comes from
+
+| Curve | Source | How |
+|---|---|---|
+| BVAL | PDEx, `pds.com.ph` | GraphQL API, one request per trade date |
+| KLIBOR | Bank Negara Malaysia FMIP | Server-rendered table, parsed from HTML |
+| SOFR | Federal Reserve Bank of New York | Public JSON API |
+
+Rates are stored exactly as published - no interpolation, no adjustment, no
+business-day rolling. The number in the database is the number the source
+printed.
+
+## Things to know about the data
+
+- **KLIBOR 2M and 12M were discontinued by BNM in January 2023**, and 9M is not
+  currently published either. The dashboard marks these tenors `· past` - the
+  history is there, but they are not live. Malaysia is also transitioning from
+  KLIBOR toward **MYOR**; if MYOR becomes the reference for our deals it can be
+  added as a fourth curve (see below).
+- **BVAL history starts 15 Aug 2022** because that is as far back as the PDEx
+  API serves. Earlier BVAL data exists in the SharePoint year files used by the
+  `bval-tracker` skill (2022–2025) and could be imported if you need it.
+- **PDEx returns nothing on PH holidays**, which the fetcher treats as "no
+  publication" and skips. That is why `update.log` reports weekdays with no
+  publication - it is normal, not an error.
+- **SOFR is published one business day in arrears**, so a 2-day age on the USD
+  card is expected, not stale.
+- **CME Term SOFR (1M/3M/6M/12M) is deliberately not included.** Those are the
+  forward-looking rates that appear in loan documentation, but they are
+  licensed by CME and redistributing them in an internal tool likely needs a
+  licence. The schema will hold them if that gets cleared.
+
+Treat these figures as an internal reference. Confirm against the primary
+source before using a number in documentation or pricing.
+
+## Adding another benchmark
+
+1. Add an entry to `CURVES` in `db.py`.
+2. Add a fetcher in `sources.py` returning `(date_iso, tenor, rate)` tuples.
+3. Add a branch in `update_curve()` in `cli.py`.
+
+No schema migration is needed - the tables are keyed on curve name.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `rates.db` | SQLite database (the actual data) |
+| `db.py` | Schema, curve registry, storage helpers |
+| `sources.py` | One fetcher per benchmark |
+| `cli.py` | `update` / `backfill` / `status` |
+| `serve.py` | Local web server and JSON API |
+| `dashboard.html` | The dashboard UI |
+| `streamlit_app.py` | The hosted dashboard (Streamlit Cloud) |
+| `DEPLOY.md` | How to publish it and share it with colleagues |
+| `.github/workflows/daily-update.yml` | Daily fetch on GitHub's servers, replaces the Windows task once hosted |
+| `requirements.txt` | Dependencies for the hosted version only |
+| `config.json` | API key, tolerances and thresholds - edit here, not in the code. Gitignored |
+| `config.example.json` | Template committed in its place, with the key blank |
+| `run_daily.cmd` | What the scheduled task runs |
+| `install_task.ps1` | Registers/removes the scheduled task |
+| `open_app.cmd` | Starts the dashboard |
+| `update.log` | Rolling log of daily runs |
+| `tests/test_contract.py` | Format and resilience tests |
+| `tests/golden/` | Reference CSV exports the tests compare against |

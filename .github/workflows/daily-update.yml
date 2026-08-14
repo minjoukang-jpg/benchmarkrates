@@ -1,0 +1,56 @@
+name: Daily rates update
+
+# Replaces the Windows scheduled task once the app is hosted: this runs on
+# GitHub's servers, so no laptop needs to be switched on.
+on:
+  schedule:
+    # 09:30 Asia/Manila and Asia/Kuala_Lumpur (both UTC+8), weekdays.
+    # Late enough that BVAL and KLIBOR have published for the day.
+    - cron: "30 1 * * 1-5"
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+
+concurrency:
+  group: rates-update       # never let two runs write the database at once
+  cancel-in-progress: false
+
+permissions:
+  contents: write           # needed to commit the refreshed database
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch the latest rates
+        env:
+          PDEX_API_KEY: ${{ secrets.PDEX_API_KEY }}
+        run: python cli.py update
+
+      - name: Run the contract tests
+        # If a source changed shape in a way that would alter the CSV format,
+        # fail here rather than committing it.
+        run: python tests/test_contract.py
+
+      - name: Fold the write-ahead log into the database file
+        run: python -c "import db; db.checkpoint()"
+
+      - name: Commit if anything changed
+        run: |
+          git config user.name  "rates-bot"
+          git config user.email "rates-bot@users.noreply.github.com"
+          git add rates.db
+          if git diff --staged --quiet; then
+            echo "No new rates today (weekend, public holiday, or already current)."
+          else
+            git commit -m "Rates update $(date -u +%Y-%m-%d)"
+            git push
+          fi
+
+      - name: Report source health
+        if: always()
+        run: python cli.py status

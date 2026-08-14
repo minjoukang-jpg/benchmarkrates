@@ -1,0 +1,310 @@
+"""Local web app for the benchmark rates database.
+
+    python serve.py            # http://127.0.0.1:8765
+    python serve.py --port 9000
+
+Binds to loopback only - nothing is exposed to the network.
+"""
+
+import argparse
+import datetime
+import io
+import csv
+import json
+import os
+import subprocess
+import sys
+import threading
+import urllib.parse
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+import db
+import sources
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+_refresh_lock = threading.Lock()
+_refresh_state = {"running": False, "finished_at": None, "output": None}
+
+
+# --------------------------------------------------------------------------
+# Data access
+# --------------------------------------------------------------------------
+
+def get_meta(conn):
+    out = []
+    today = datetime.date.today()
+    for curve, meta in db.CURVES.items():
+        row = conn.execute(
+            "SELECT COUNT(*) n, MIN(rate_date) a, MAX(rate_date) b "
+            "FROM rates WHERE curve=?", (curve,)).fetchone()
+        tenors = [r["tenor"] for r in conn.execute(
+            "SELECT DISTINCT tenor FROM rates WHERE curve=?", (curve,)).fetchall()]
+        tenors.sort(key=db.tenor_sort_key)
+
+        # Tenors still being published. BNM discontinued 2M and 12M KLIBOR in
+        # Jan 2023, so the all-time tenor list overstates what is live today.
+        active = [r["tenor"] for r in conn.execute(
+            "SELECT DISTINCT tenor FROM rates WHERE curve=? AND rate_date=?",
+            (curve, row["b"])).fetchall()] if row["b"] else []
+        active.sort(key=db.tenor_sort_key)
+        log = conn.execute(
+            "SELECT run_at, status, message FROM fetch_log WHERE curve=? "
+            "ORDER BY id DESC LIMIT 1", (curve,)).fetchone()
+
+        age = None
+        if row["b"]:
+            age = (today - datetime.date.fromisoformat(row["b"])).days
+
+        # A source is "failing" only when the daily job actually errored. A
+        # quiet weekend logs 'no_publication', which is not a problem.
+        fails = db.recent_failures(conn, curve)
+        missed = db.missed_weekdays(conn, curve)
+        tolerance = int(sources.CONFIG.get("missed_weekdays_before_alarm", {}).get(curve, 3))
+
+        out.append({
+            "curve": curve, "label": meta["label"], "currency": meta["currency"],
+            "market": meta["market"], "description": meta["description"],
+            "source": meta["source"], "url": meta["url"],
+            "rows": row["n"], "first_date": row["a"], "last_date": row["b"],
+            "tenors": tenors, "active_tenors": active, "age_days": age,
+            # Counted in weekdays against a per-source tolerance, so a weekend
+            # or a public holiday never reads as stale.
+            "stale": missed is not None and missed > tolerance,
+            "last_run": log["run_at"] if log else None,
+            "last_status": log["status"] if log else None,
+            "last_message": log["message"] if log else None,
+            "failing": bool(fails),
+            "fail_count": len(fails),
+            "last_error": fails[0]["message"] if fails else None,
+            "missed_weekdays": missed,
+            "missed_tolerance": tolerance,
+        })
+    return out
+
+
+def get_latest(conn, curve):
+    """Newest published term structure, with the change vs the prior
+    publication date for that same tenor."""
+    last = db.latest_date(conn, curve)
+    if not last:
+        return {"curve": curve, "date": None, "rows": []}
+
+    rows = []
+    for r in conn.execute(
+            "SELECT tenor, rate FROM rates WHERE curve=? AND rate_date=?",
+            (curve, last)).fetchall():
+        prev = conn.execute(
+            "SELECT rate_date, rate FROM rates WHERE curve=? AND tenor=? AND rate_date<? "
+            "ORDER BY rate_date DESC LIMIT 1", (curve, r["tenor"], last)).fetchone()
+        rows.append({
+            "tenor": r["tenor"],
+            "rate": r["rate"],
+            "prev_rate": prev["rate"] if prev else None,
+            "prev_date": prev["rate_date"] if prev else None,
+            "change_bp": round((r["rate"] - prev["rate"]) * 100, 1) if prev else None,
+        })
+    rows.sort(key=lambda x: db.tenor_sort_key(x["tenor"]))
+    return {"curve": curve, "date": last, "rows": rows}
+
+
+def get_series(conn, curve, tenors, start, end):
+    """Aligned time series: a shared date axis with None for gaps, so the
+    front end never has to reconcile differing publication calendars."""
+    if not tenors:
+        return {"dates": [], "series": {}}
+    marks = ",".join("?" * len(tenors))
+    params = [curve] + list(tenors) + [start, end]
+    rows = conn.execute(
+        f"SELECT rate_date, tenor, rate FROM rates "
+        f"WHERE curve=? AND tenor IN ({marks}) AND rate_date BETWEEN ? AND ? "
+        f"ORDER BY rate_date", params).fetchall()
+
+    dates = sorted({r["rate_date"] for r in rows})
+    index = {d: i for i, d in enumerate(dates)}
+    series = {t: [None] * len(dates) for t in tenors}
+    for r in rows:
+        series[r["tenor"]][index[r["rate_date"]]] = r["rate"]
+    return {"dates": dates, "series": series}
+
+
+def get_curve_shape(conn, curve, date):
+    """Term structure on the latest date at or before `date`."""
+    row = conn.execute(
+        "SELECT MAX(rate_date) d FROM rates WHERE curve=? AND rate_date<=?",
+        (curve, date)).fetchone()
+    if not row or not row["d"]:
+        return {"date": None, "points": []}
+    actual = row["d"]
+    points = [{"tenor": r["tenor"], "rate": r["rate"], "months": db.tenor_sort_key(r["tenor"])}
+              for r in conn.execute(
+                  "SELECT tenor, rate FROM rates WHERE curve=? AND rate_date=?",
+                  (curve, actual)).fetchall()]
+    points.sort(key=lambda p: p["months"])
+    return {"date": actual, "points": points}
+
+
+def export_csv(conn, curve, start, end):
+    """Wide format - one row per date, one column per tenor. Paste-ready."""
+    rows = conn.execute(
+        "SELECT rate_date, tenor, rate FROM rates WHERE curve=? "
+        "AND rate_date BETWEEN ? AND ? ORDER BY rate_date DESC", (curve, start, end)).fetchall()
+    tenors = sorted({r["tenor"] for r in rows}, key=db.tenor_sort_key)
+    table = {}
+    for r in rows:
+        table.setdefault(r["rate_date"], {})[r["tenor"]] = r["rate"]
+
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["Date"] + tenors)
+    for date in sorted(table, reverse=True):
+        w.writerow([date] + [table[date].get(t, "") for t in tenors])
+    return buf.getvalue()
+
+
+# --------------------------------------------------------------------------
+# Refresh (runs the same cli.py the scheduled task runs)
+# --------------------------------------------------------------------------
+
+def _run_refresh():
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(HERE, "cli.py"), "update"],
+            capture_output=True, text=True, timeout=900, cwd=HERE)
+        _refresh_state["output"] = (proc.stdout or "") + (proc.stderr or "")
+    except Exception as exc:
+        _refresh_state["output"] = f"Refresh failed: {exc}"
+    finally:
+        _refresh_state["running"] = False
+        _refresh_state["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def start_refresh():
+    with _refresh_lock:
+        if _refresh_state["running"]:
+            return False
+        _refresh_state.update(running=True, output=None, finished_at=None)
+    threading.Thread(target=_run_refresh, daemon=True).start()
+    return True
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "RatesDB/1.0"
+
+    def log_message(self, fmt, *args):
+        pass  # keep the console clean; failures still surface in the browser
+
+    # -- helpers ----------------------------------------------------------
+    def _send(self, code, body, ctype="application/json; charset=utf-8", extra=None):
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, obj, code=200):
+        self._send(code, json.dumps(obj, default=str))
+
+    def _file(self, name, ctype):
+        path = os.path.join(HERE, name)
+        if not os.path.exists(path):
+            return self._send(404, "not found", "text/plain; charset=utf-8")
+        with open(path, "rb") as fh:
+            self._send(200, fh.read(), ctype)
+
+    # -- routes -----------------------------------------------------------
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        route = parsed.path
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+
+        if route in ("/", "/index.html"):
+            return self._file("dashboard.html", "text/html; charset=utf-8")
+
+        if not route.startswith("/api/"):
+            return self._send(404, "not found", "text/plain; charset=utf-8")
+
+        conn = db.connect()
+        try:
+            if route == "/api/meta":
+                return self._json({
+                    "curves": get_meta(conn),
+                    "today": datetime.date.today().isoformat(),
+                    "refresh": _refresh_state,
+                })
+
+            if route == "/api/latest":
+                curve = q.get("curve")
+                if curve not in db.CURVES:
+                    return self._json({"error": "unknown curve"}, 400)
+                return self._json(get_latest(conn, curve))
+
+            if route == "/api/series":
+                curve = q.get("curve")
+                if curve not in db.CURVES:
+                    return self._json({"error": "unknown curve"}, 400)
+                tenors = [t for t in (q.get("tenors") or "").split(",") if t]
+                start = q.get("start") or "1900-01-01"
+                end = q.get("end") or datetime.date.today().isoformat()
+                return self._json(get_series(conn, curve, tenors, start, end))
+
+            if route == "/api/shape":
+                curve = q.get("curve")
+                if curve not in db.CURVES:
+                    return self._json({"error": "unknown curve"}, 400)
+                date = q.get("date") or datetime.date.today().isoformat()
+                return self._json(get_curve_shape(conn, curve, date))
+
+            if route == "/api/export":
+                curve = q.get("curve")
+                if curve not in db.CURVES:
+                    return self._json({"error": "unknown curve"}, 400)
+                start = q.get("start") or "1900-01-01"
+                end = q.get("end") or datetime.date.today().isoformat()
+                body = export_csv(conn, curve, start, end)
+                fname = f"{curve}_{start}_to_{end}.csv"
+                return self._send(200, body, "text/csv; charset=utf-8",
+                                  {"Content-Disposition": f'attachment; filename="{fname}"'})
+
+            return self._json({"error": "unknown endpoint"}, 404)
+        finally:
+            conn.close()
+
+    def do_POST(self):
+        if urllib.parse.urlparse(self.path).path != "/api/refresh":
+            return self._json({"error": "unknown endpoint"}, 404)
+        started = start_refresh()
+        return self._json({"started": started, "state": _refresh_state})
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Rates database web app")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--no-browser", action="store_true")
+    args = ap.parse_args()
+
+    db.init()  # make sure the schema exists even on a fresh checkout
+    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    url = f"http://127.0.0.1:{args.port}"
+    print(f"Rates database running at {url}")
+    print("Press Ctrl+C to stop.")
+    if not args.no_browser:
+        import webbrowser
+        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+if __name__ == "__main__":
+    main()
