@@ -49,6 +49,19 @@ st.set_page_config(page_title="Benchmark Rates", page_icon="chart_with_upwards_t
 # Data
 # --------------------------------------------------------------------------
 
+def _build_database(path):
+    """Build a SQLite database at `path` from the committed CSVs."""
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(path + suffix):
+            os.remove(path + suffix)
+    conn = db.init(path)
+    db.read_csv_files(conn)
+    conn.close()
+    # Leave no write-ahead log beside it, so read-only opens never depend on
+    # being able to create the -shm sidecar.
+    db.checkpoint(path)
+
+
 @st.cache_resource
 def database_path():
     """Path to a readable database, built from the committed CSVs when hosted.
@@ -57,6 +70,11 @@ def database_path():
     survives git and browser uploads intact, is a fraction of the size, and can
     be diffed. A 9 MB SQLite binary pushed through a web uploader arrives
     corrupted, which is exactly what happened before this changed.
+
+    The build path includes the process id on purpose. With a fixed shared name,
+    a redeployed or restarted process would delete and rebuild the very file a
+    still-running process was reading, and the older one then failed with
+    OperationalError on its next query. Each process now owns its own file.
 
     Note this caches the file PATH, a plain string, and never a connection. A
     cached connection breaks as soon as Streamlit reruns the script on another
@@ -67,13 +85,8 @@ def database_path():
     if not db.csv_files_present():
         return None
 
-    build = os.path.join(tempfile.gettempdir(), "rates_from_csv.db")
-    for suffix in ("", "-wal", "-shm"):
-        if os.path.exists(build + suffix):
-            os.remove(build + suffix)
-    conn = db.init(build)
-    db.read_csv_files(conn)
-    conn.close()
+    build = os.path.join(tempfile.gettempdir(), f"rates_csv_{os.getpid()}.db")
+    _build_database(build)
     return build
 
 
@@ -87,7 +100,15 @@ def _conn():
     ProgrammingError the moment anyone touches a control. Connections are cheap
     and the results are cached below, so the database is barely touched.
     """
-    conn = db.connect_readonly(database_path())
+    path = database_path()
+    if path is None:
+        raise RuntimeError("No rate data available: data/*.csv is missing.")
+    # Self-heal if the build vanished underneath us - temp cleanup on a
+    # long-running host, or a restart between one query and the next.
+    if not os.path.exists(path) and path != DB_PATH:
+        _build_database(path)
+
+    conn = db.connect_readonly(path)
     try:
         yield conn
     finally:
