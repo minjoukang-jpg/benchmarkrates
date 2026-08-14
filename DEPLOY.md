@@ -27,24 +27,26 @@ access list.
 Make it **private**. Streamlit Community Cloud can deploy from private
 repositories.
 
+**The whole folder is safe to upload.** The PDEx API key is not stored in it -
+it lives in the `PDEX_API_KEY` Windows environment variable. So whether you drag
+every file into GitHub's web uploader or push from the command line, nothing
+secret goes with it.
+
+To push from the command line:
+
 ```bash
-cd C:\Users\MJkang\rates-db
-git init
-git add .
-git commit -m "Benchmark rates database and dashboard"
-git branch -M main
 git remote add origin https://github.com/<your-account>/<repo-name>.git
+```
+
+```bash
 git push -u origin main
 ```
 
-Before that first push, confirm the API key is not going with it:
-
-```bash
-git status --porcelain --ignored | findstr config.json
-```
-
-You should see `!! config.json`, meaning it is ignored. `config.example.json`
-is committed in its place, with the key blank.
+To upload through the browser instead: **Add file > Upload files**, select
+everything in `C:\Users\MJkang\rates-db`, drag it in, and commit. Check
+afterwards that the `.github` folder arrived, since some browsers drop folders
+whose name starts with a dot, and `.github/workflows/daily-update.yml` is what
+runs the daily update.
 
 ## Step 2: add the PDEx key as a GitHub secret
 
@@ -52,7 +54,8 @@ In the repository: **Settings > Secrets and variables > Actions > New
 repository secret**.
 
 - Name: `PDEX_API_KEY`
-- Value: the key from your local `config.json`
+- Value: your key. To read it back, run this in PowerShell:
+  `[Environment]::GetEnvironmentVariable("PDEX_API_KEY","User")`
 
 Without this the daily workflow will still run, but BVAL will report
 "No PDEx API key configured" and only KLIBOR and SOFR will update.

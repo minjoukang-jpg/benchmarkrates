@@ -98,9 +98,11 @@ class Outcome:
 # --------------------------------------------------------------------------
 
 _DEFAULTS = {
-    # Deliberately empty. The key comes from config.json locally (gitignored)
-    # or the PDEX_API_KEY environment variable when hosted, so that it is never
-    # committed to a repository.
+    # Deliberately empty. The key always comes from the PDEX_API_KEY environment
+    # variable: a user variable on Windows, an Actions secret when hosted. It is
+    # never written to a file in this folder, so the whole folder is safe to
+    # upload. config.json may still supply it as a fallback for anyone who
+    # prefers that, but nothing here ships with a key in it.
     "pdex_api_key": "",
     "lookback_days": 45,
     "anomaly_min_overlap": 20,
@@ -310,8 +312,9 @@ def fetch_bval_day(trade_date, api_key=None):
     key = api_key or CONFIG["pdex_api_key"]
     if not key:
         return Outcome(FAILED, [], None,
-                       "No PDEx API key configured. Set pdex_api_key in config.json, "
-                       "or the PDEX_API_KEY environment variable when running hosted.")
+                       "No PDEx API key configured. Set the PDEX_API_KEY environment "
+                       "variable (Start > 'Edit environment variables for your account'), "
+                       "or a GitHub Actions secret of that name when running hosted.")
     out = _try_strategies([("pdex-graphql", lambda: (_bval_call(trade_date, key), False))])
     if out.ok:
         validate_rows("BVAL", out.rows)

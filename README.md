@@ -255,8 +255,7 @@ No schema migration is needed - the tables are keyed on curve name.
 | `DEPLOY.md` | How to publish it and share it with colleagues |
 | `.github/workflows/daily-update.yml` | Daily fetch on GitHub's servers, replaces the Windows task once hosted |
 | `requirements.txt` | Dependencies for the hosted version only |
-| `config.json` | API key, tolerances and thresholds - edit here, not in the code. Gitignored |
-| `config.example.json` | Template committed in its place, with the key blank |
+| `config.json` | Tolerances and thresholds. No secrets - safe to commit |
 | `run_daily.cmd` | Local daily update, if you ever re-enable the Windows task |
 | `install_task.ps1` | Registers/removes the Windows task (currently not registered) |
 | `open_app.cmd` | Starts the local dashboard |

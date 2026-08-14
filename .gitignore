@@ -11,7 +11,8 @@ bval_backfill.log
 __pycache__/
 *.pyc
 
-# Never commit the PDEx API key. On GitHub it comes from Actions secrets, on
-# Streamlit Cloud from app secrets. See DEPLOY.md.
-config.json
+# config.json is NOT excluded: it holds tolerances and thresholds only, no
+# secrets. The PDEx API key lives in the PDEX_API_KEY environment variable
+# locally, and in GitHub Actions secrets when hosted, so that nothing secret
+# ever sits in this folder and the whole folder is safe to upload.
 .streamlit/secrets.toml

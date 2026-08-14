@@ -1,0 +1,20 @@
+{
+  "_comment": "Settings for the rates database. This file contains NO secrets, so the whole folder is safe to upload to GitHub.",
+
+  "_pdex_api_key_note": "The PDEx API key is NOT stored here. It lives in the Windows user environment variable PDEX_API_KEY so that nothing secret sits in this folder. To view or change it, open Start > 'Edit environment variables for your account'. On GitHub it is supplied as an Actions secret of the same name. If BVAL ever reports 'No PDEx API key configured', the variable is missing: get a fresh key from https://www.pds.com.ph/wd-mp/php-bval-reference-rate-benchmark-tenors (F12 > Network > reload > click the /api-mp/graphql/ request > copy the value after 'APIKey ' in the Authorization header) and set it there.",
+
+  "lookback_days": 45,
+  "_lookback_days_help": "How far back each daily run re-checks, so late publications and revisions are picked up.",
+
+  "anomaly_min_overlap": 20,
+  "anomaly_change_bp": 25,
+  "anomaly_max_fraction": 0.30,
+  "_anomaly_help": "Guard against a source silently changing shape (for example BNM reordering its columns). If at least anomaly_min_overlap already-stored observations are re-fetched and more than anomaly_max_fraction of them move by more than anomaly_change_bp basis points, the write is blocked and reported instead of overwriting good data. Override once with: python cli.py update --force",
+
+  "missed_weekdays_before_alarm": {
+    "BVAL": 3,
+    "KLIBOR": 3,
+    "SOFR": 4
+  },
+  "_missed_weekdays_help": "A source is only treated as broken after this many consecutive weekdays with nothing published. This absorbs public holidays without needing a holiday calendar, and covers SOFR publishing one business day in arrears."
+}
