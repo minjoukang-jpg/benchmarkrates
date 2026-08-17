@@ -8,7 +8,9 @@
 # or off at the scheduled time, the task runs at the next opportunity.
 
 param(
-    [string]$Time = "08:15",
+    # Noon, matching the GitHub Actions schedule. Only relevant if you run the
+    # update locally instead of on GitHub; do not run both.
+    [string]$Time = "12:00",
     [string]$TaskName = "Benchmark Rates Daily Update",
     [switch]$Remove
 )
