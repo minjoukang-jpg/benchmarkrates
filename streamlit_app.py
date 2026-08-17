@@ -15,6 +15,7 @@ byte-for-byte.
 
 import contextlib
 import datetime
+import hashlib
 import os
 import tempfile
 
@@ -62,14 +63,38 @@ def _build_database(path):
     db.checkpoint(path)
 
 
+def data_fingerprint():
+    """Cheap signature of the CSV files: name, size and modification time.
+
+    Every cache below is keyed on this. The daily workflow commits new CSVs, and
+    when the host picks them up the fingerprint changes, so the database is
+    rebuilt and every cached query is invalidated together.
+
+    Without it the app served stale numbers indefinitely: st.cache_resource has
+    no expiry, so the database built from the first set of CSVs was kept for the
+    life of the process even after newer files landed underneath it.
+    """
+    if not db.csv_files_present():
+        return ""
+    parts = []
+    for name in sorted(os.listdir(db.DATA_DIR)):
+        if name.endswith(".csv"):
+            info = os.stat(os.path.join(db.DATA_DIR, name))
+            parts.append(f"{name}:{info.st_size}:{int(info.st_mtime)}")
+    return "|".join(parts)
+
+
 @st.cache_resource
-def database_path():
+def database_path(fingerprint):
     """Path to a readable database, built from the committed CSVs when hosted.
 
     The repository carries the data as CSV under data/, not as rates.db: text
     survives git and browser uploads intact, is a fraction of the size, and can
     be diffed. A 9 MB SQLite binary pushed through a web uploader arrives
     corrupted, which is exactly what happened before this changed.
+
+    `fingerprint` is not used in the body - it is the cache key. A new value
+    means the CSVs changed, so a fresh database gets built.
 
     The build path includes the process id on purpose. With a fixed shared name,
     a redeployed or restarted process would delete and rebuild the very file a
@@ -85,8 +110,14 @@ def database_path():
     if not db.csv_files_present():
         return None
 
-    build = os.path.join(tempfile.gettempdir(), f"rates_csv_{os.getpid()}.db")
-    _build_database(build)
+    # The fingerprint is in the filename too, so a rebuild never has to
+    # overwrite a file an in-flight request is still reading. hashlib rather
+    # than hash(), which is salted per process and so would not be stable.
+    digest = hashlib.sha1(fingerprint.encode()).hexdigest()[:10]
+    tag = f"{os.getpid()}_{digest}"
+    build = os.path.join(tempfile.gettempdir(), f"rates_csv_{tag}.db")
+    if not os.path.exists(build):
+        _build_database(build)
     return build
 
 
@@ -100,7 +131,7 @@ def _conn():
     ProgrammingError the moment anyone touches a control. Connections are cheap
     and the results are cached below, so the database is barely touched.
     """
-    path = database_path()
+    path = database_path(data_fingerprint())
     if path is None:
         raise RuntimeError("No rate data available: data/*.csv is missing.")
     # Self-heal if the build vanished underneath us - temp cleanup on a
@@ -115,32 +146,37 @@ def _conn():
         conn.close()
 
 
+# Each loader takes the fingerprint as its first argument purely as a cache key.
+# Without it these would keep returning results computed from the previous set of
+# CSVs, so the page would show stale rates even after the database was rebuilt.
+# The ttl is a backstop for the case where mtime somehow does not change.
+
 @st.cache_data(ttl=900)
-def load_meta():
+def load_meta(fp):
     with _conn() as c:
         return serve.get_meta(c)
 
 
 @st.cache_data(ttl=900)
-def load_latest(curve):
+def load_latest(fp, curve):
     with _conn() as c:
         return serve.get_latest(c, curve)
 
 
 @st.cache_data(ttl=900)
-def load_series(curve, tenors, start, end):
+def load_series(fp, curve, tenors, start, end):
     with _conn() as c:
         return serve.get_series(c, curve, list(tenors), start, end)
 
 
 @st.cache_data(ttl=900)
-def load_shape(curve, date):
+def load_shape(fp, curve, date):
     with _conn() as c:
         return serve.get_curve_shape(c, curve, date)
 
 
 @st.cache_data(ttl=900)
-def load_csv(curve, start, end):
+def load_csv(fp, curve, start, end):
     with _conn() as c:
         return serve.export_csv(c, curve, start, end)
 
@@ -161,19 +197,25 @@ def nice_date(iso):
 # Page
 # --------------------------------------------------------------------------
 
-if database_path() is None:
+FP = data_fingerprint()   # one signature per script run, keys every cache
+if database_path(FP) is None:
     st.error(
         "No rate data found in this deployment. The repository should contain "
         "`data/BVAL.csv`, `data/KLIBOR.csv` and so on, which the daily workflow "
         "keeps up to date. Check that the `data/` folder was committed.")
     st.stop()
 
-meta = load_meta()
+meta = load_meta(FP)
 total = sum(m["rows"] for m in meta)
 
 st.title("Benchmark Rates")
+
+# Show the newest date held, so stale data is visible rather than something you
+# have to notice by comparing against the source.
+_newest = max((m["last_date"] for m in meta if m["last_date"]), default=None)
 st.caption(f"PHP, MYR and USD base interest rates · {total:,} observations · "
-           f"refreshed automatically each weekday")
+           f"data to {nice_date(_newest) if _newest else 'no data'} · "
+           f"updated daily at noon Malaysia time")
 
 # -- health banners --------------------------------------------------------
 # Only a genuine failure is surfaced. A weekend or a public holiday logs
@@ -223,7 +265,7 @@ for col, (market, flag, curve_names) in zip(st.columns(len(groups)), groups):
             if not m["rows"]:
                 st.metric(m["label"], "no data")
                 continue
-            latest = load_latest(curve)
+            latest = load_latest(FP, curve)
             rows = latest["rows"]
             # Which tenor headlines the card is declared per curve in db.CURVES
             # and resolved by get_latest, so both dashboards agree.
@@ -293,7 +335,7 @@ if not tenors:
 elif not end:
     st.info("No data for this market yet.")
 else:
-    data = load_series(curve, tuple(tenors), start, end)
+    data = load_series(FP, curve, tuple(tenors), start, end)
     records = []
     for tenor in tenors:
         for date, value in zip(data["dates"], data["series"].get(tenor, [])):
@@ -339,7 +381,7 @@ else:
 
         st.download_button(
             f"Download {curve} CSV",
-            data=load_csv(curve, start, end),
+            data=load_csv(FP, curve, start, end),
             file_name=f"{curve}_{start}_to_{end}.csv",
             mime="text/csv")
 
@@ -369,8 +411,8 @@ else:
     latest_iso = curve_meta["last_date"]
     earlier_iso = (datetime.date.fromisoformat(latest_iso)
                    - datetime.timedelta(days=back_days)).isoformat()
-    now_shape = load_shape(curve, latest_iso)
-    then_shape = load_shape(curve, earlier_iso)
+    now_shape = load_shape(FP, curve, latest_iso)
+    then_shape = load_shape(FP, curve, earlier_iso)
 
     order = [p["tenor"] for p in now_shape["points"]]
     records = []
