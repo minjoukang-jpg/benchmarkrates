@@ -82,6 +82,34 @@ The dashboard gives you:
   the shape has moved.
 - **Refresh now** - runs the same update the scheduled job runs.
 
+## The hosted app going to sleep
+
+Streamlit Community Cloud puts an app to sleep after roughly a week with no
+visitors. It then shows a "Zzzz" holding page, and someone has to click **"Yes,
+get this app back up!"** and wait a minute or two while it restarts. No data is
+lost; the app just has to boot again.
+
+`.github/workflows/keep-awake.yml` runs once a day and opens the app in a
+headless browser to keep the inactivity timer from ever reaching the threshold.
+If it finds the app already asleep, it clicks the wake button.
+
+**Why a browser and not a simple ping.** Fetching the URL returns Streamlit's
+static React shell and nothing else - byte-for-byte the same whether the app is
+running or asleep, which is also why a curl cannot even tell you which state it
+is in. The app only starts when a browser opens a websocket back to the server,
+so an HTTP request almost certainly does not count as a visit. A curl-based
+keep-alive would have looked like it worked while doing nothing.
+
+**This is not guaranteed.** Streamlit does not document what resets the timer.
+The approach is well-founded rather than certain. If the app still sleeps:
+
+- **Live with it.** One click and about a minute, only after a week of nobody
+  looking. For a reference tool consulted a few times a week it may never
+  trigger, because ordinary use resets the timer anyway.
+- **Increase the frequency** by editing the cron in `keep-awake.yml`.
+- **Move off the free tier.** Streamlit offers paid hosting that does not sleep,
+  and the app would run unchanged on any host that keeps a container alive.
+
 ## Automatic daily updates
 
 **Updates run on GitHub, not on this laptop.** The workflow in

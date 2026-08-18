@@ -1,0 +1,76 @@
+name: Keep the app awake
+
+# Streamlit Community Cloud puts an app to sleep after roughly a week without
+# visitors. This opens the app in a real headless browser so the visit counts.
+#
+# Why a browser and not curl: fetching the URL only returns Streamlit's static
+# React shell - the same bytes whether the app is running or asleep. The app
+# itself only starts when a browser opens a websocket back to the server, so a
+# plain HTTP request almost certainly does not register as a viewer session.
+# Playwright loads the page properly and waits for that connection.
+#
+# Caveat worth keeping in mind: Streamlit does not document exactly what resets
+# the inactivity timer, so this is a well-founded approach rather than a
+# guarantee. If the app still sleeps, README.md lists the alternatives.
+on:
+  schedule:
+    # Once a day, well away from the noon data run. The sleep threshold is about
+    # a week, so daily leaves a wide margin even if a run is skipped.
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keep-awake
+  cancel-in-progress: true
+
+permissions:
+  contents: read              # only reads; never commits
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install a headless browser
+        run: npx --yes playwright@1.47.0 install --with-deps chromium
+
+      - name: Open the app and hold a session
+        env:
+          APP_URL: https://benchmarkrates-g5ypaw2qmsyzgjtynsupzo.streamlit.app
+        run: |
+          cat > visit.mjs <<'EOF'
+          import { chromium } from 'playwright';
+
+          const url = process.env.APP_URL;
+          const browser = await chromium.launch();
+          const page = await browser.newPage();
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+
+          // If it had already fallen asleep, this button is the only way back.
+          const wake = page.getByText(/get this app back up/i);
+          if (await wake.count()) {
+            console.log('App was asleep. Clicking the wake button.');
+            await wake.first().click();
+          }
+
+          // Wait for the app itself to render, not just the shell. The title is
+          // set by our own page, so seeing it proves the session really ran.
+          try {
+            await page.getByText('Benchmark Rates').first()
+                      .waitFor({ state: 'visible', timeout: 120000 });
+            console.log('App is awake and rendered.');
+          } catch {
+            console.log('::warning::Did not see the app render within the timeout.');
+            console.log(await page.title());
+          }
+
+          // Hold the websocket open briefly so the visit is unambiguous.
+          await page.waitForTimeout(15000);
+          await browser.close();
+          EOF
+
+          npm install --no-save playwright@1.47.0
+          node visit.mjs
