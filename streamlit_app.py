@@ -244,6 +244,14 @@ def load_latest(fp, curve):
 
 
 @st.cache_data(ttl=900)
+def load_series_pairs(fp, pairs, start, end):
+    """pairs is a tuple of (curve, tenor) tuples; it has to be hashable to be a
+    cache key, which is why it is not a list."""
+    with _conn() as conn:
+        return serve.get_series_pairs(conn, list(pairs), start, end)
+
+
+@st.cache_data(ttl=900)
 def load_series(fp, curve, tenors, start, end):
     with _conn() as c:
         return serve.get_series(c, curve, list(tenors), start, end)
@@ -470,30 +478,65 @@ with c2:
         f"Tenors (up to {MAX_SERIES})", curve_meta["tenors"], default=default,
         help="Tenors not in the latest publication are historical only. BNM "
              "discontinued 2M and 12M KLIBOR in January 2023.")
-if len(tenors) > MAX_SERIES:
-    st.info(f"Showing the first {MAX_SERIES} tenors selected.")
-    tenors = tenors[:MAX_SERIES]
+
+# Any tenor of any other market can be laid over the same axis, so the gap
+# between, say, USD SOFR and PHP BVAL is readable directly instead of by
+# flipping between two charts. All the curves are quoted in percent, so they
+# share an axis honestly; what differs is the currency, which is the point of
+# the comparison rather than a problem with it.
+other_options, other_lookup = [], {}
+for m in with_data:
+    if m["curve"] == curve:
+        continue
+    for tenor in (m["active_tenors"] or m["tenors"]):
+        label = f"{m['label']} {tenor}"
+        other_options.append(label)
+        other_lookup[label] = (m["curve"], tenor)
+
+compare_labels = st.multiselect(
+    "Compare with other markets", other_options, default=[],
+    help="Rates from different currencies on one axis. The level gap is a "
+         "currency difference, not a spread you could trade.")
+
+primary = [(curve, t) for t in tenors]
+overlay = [other_lookup[label] for label in compare_labels]
+if len(primary) + len(overlay) > MAX_SERIES:
+    # Trim the tenor list, not the comparisons. The tenors are often just the
+    # defaults this market loaded with, whereas a comparison was picked
+    # deliberately, so cutting the tail of the combined list would drop the one
+    # series the reader actually came for.
+    overlay = overlay[:MAX_SERIES]
+    primary = primary[:max(0, MAX_SERIES - len(overlay))]
+    st.info(f"Showing {MAX_SERIES} series at a time. Comparisons are kept and "
+            f"the tenor list is trimmed to fit.")
+pairs = primary + overlay
 
 range_label = st.radio("Range", list(RANGES), index=3, horizontal=True,
                        label_visibility="collapsed")
 
-end = curve_meta["last_date"]
+# The window ends at the newest date any selected market has published, so a
+# market that is a day behind is not silently cropped off the right edge.
+last_dates = [meta_by_curve[c]["last_date"] for c, _ in pairs
+              if meta_by_curve[c]["last_date"]]
+end = max(last_dates) if last_dates else curve_meta["last_date"]
 days = RANGES[range_label]
 start = "1900-01-01"
 if end and days:
     start = (datetime.date.fromisoformat(end) - datetime.timedelta(days=days)).isoformat()
 
-if not tenors:
+if not pairs:
     st.info("Select at least one tenor.")
 elif not end:
     st.info("No data for this market yet.")
 else:
-    data = load_series(FP, curve, tuple(tenors), start, end)
+    data = load_series_pairs(FP, tuple(pairs), start, end)
+    order = [serve.series_key(c, t) for c, t in pairs]
+    names = data["labels"]
     records = []
-    for tenor in tenors:
-        for date, value in zip(data["dates"], data["series"].get(tenor, [])):
+    for key in order:
+        for date, value in zip(data["dates"], data["series"].get(key, [])):
             if value is not None:
-                records.append({"Date": date, "Tenor": tenor, "Rate": value})
+                records.append({"Date": date, "Series": names[key], "Rate": value})
 
     if not records:
         st.info("No data in this range. The tenors selected may be discontinued.")
@@ -501,10 +544,10 @@ else:
         frame = pd.DataFrame(records)
         frame["Date"] = pd.to_datetime(frame["Date"])
 
-        # Colour follows the tenor's fixed position, so changing the selection
+        # Colour follows the series' fixed position, so changing the selection
         # never repaints the series that remain.
-        order = [t for t in curve_meta["tenors"] if t in tenors]
-        scale = alt.Scale(domain=order, range=palette()[:len(order)])
+        domain = [names[k] for k in order]
+        scale = alt.Scale(domain=domain, range=palette()[:len(domain)])
 
         chart = (
             alt.Chart(frame)
@@ -513,10 +556,10 @@ else:
                 x=alt.X("Date:T", title=None),
                 y=alt.Y("Rate:Q", title="Rate %",
                         scale=alt.Scale(zero=False, nice=True)),
-                color=alt.Color("Tenor:N", scale=scale,
+                color=alt.Color("Series:N", scale=scale, sort=domain,
                                 legend=alt.Legend(title=None, orient="bottom")),
                 tooltip=[alt.Tooltip("Date:T", title="Date"),
-                         alt.Tooltip("Tenor:N"),
+                         alt.Tooltip("Series:N", title="Series"),
                          alt.Tooltip("Rate:Q", format=".3f", title="Rate %")],
             )
             .properties(height=380)
@@ -527,11 +570,20 @@ else:
         # The range buttons above cover what that would have offered.
         st.altair_chart(chart, use_container_width=True)
 
+        if len({c for c, _ in pairs}) > 1:
+            st.caption(
+                "Series from more than one market are shown. They are all "
+                "quoted in percent, but in different currencies, so the "
+                "distance between them reflects the currency as much as the "
+                "credit or the tenor.")
+
         with st.expander("Table view"):
-            wide = frame.pivot(index="Date", columns="Tenor", values="Rate")
-            wide = wide[[t for t in order if t in wide.columns]].sort_index(ascending=False)
+            wide = frame.pivot(index="Date", columns="Series", values="Rate")
+            wide = wide[[n for n in domain if n in wide.columns]].sort_index(ascending=False)
             st.dataframe(wide, use_container_width=True)
 
+        # The download stays single-market: the CSV files are per curve, and the
+        # export is the same one the contract tests pin byte-for-byte.
         st.download_button(
             f"Download {curve} CSV",
             data=load_csv(FP, curve, start, end),

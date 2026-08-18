@@ -213,6 +213,15 @@ tbody tr + tr td { border-top: 1px solid var(--grid); }
 .tchip .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: none; }
 .tchip[aria-pressed="true"] .dot { display: block; }
 .tchip.dead { color: var(--text-muted); border-style: dashed; }
+/* Series from other markets, laid over the same axis so the gap between, say,
+   USD SOFR and PHP BVAL is readable without flipping between two charts. */
+.compare { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 10px; }
+.compare label { font-size: 12px; color: var(--text-secondary); }
+.compare select { font-size: 12px; padding: 4px 8px; border-radius: 7px;
+                  border: 1px solid var(--border); background: transparent;
+                  color: inherit; max-width: 220px; }
+.tchip .x { margin-left: 2px; opacity: .55; font-weight: 600; }
+.tchip .x:hover { opacity: 1; }
 
 svg { display: block; width: 100%; height: auto; overflow: visible; }
 .gridline { stroke: var(--grid); stroke-width: 1; }
@@ -274,6 +283,11 @@ svg { display: block; width: 100%; height: auto; overflow: visible; }
     <button id="exportBtn">Export CSV</button>
   </div>
   <div class="tenors" id="tenorPick"></div>
+  <div class="compare">
+    <label for="comparePick">Compare with</label>
+    <select id="comparePick"></select>
+    <div class="tenors" id="compareChips"></div>
+  </div>
   <div id="chart"></div>
   <div class="legend" id="legend"></div>
   <div class="dataview" id="dataview" hidden></div>
@@ -303,10 +317,34 @@ const MAX_SERIES = SERIES.length;
 const RANGES = [["1M",30],["3M",91],["6M",182],["1Y",365],["3Y",1095],["5Y",1825],["Max",null]];
 
 const state = {
-  meta: [], markets: [], curve: null, tenors: [], range: 365,
-  slots: {},            // tenor -> palette slot; survivors keep their colour on filter change
-  data: null, shape: null, shapeBack: 90, tableView: false,
+  meta: [], markets: [], curve: null, tenors: [], compare: [], range: 365,
+  slots: {},            // series key -> palette slot; survivors keep their colour
+  data: null, series: [], shape: null, shapeBack: 90, tableView: false,
 };
+
+/* A line is identified by curve and tenor together. "3M" alone stopped being
+   unambiguous once KLIBOR, MYOR, THOR and SOFR could share one chart. */
+const seriesKey = (curve, tenor) => `${curve}|${tenor}`;
+
+/* Everything currently plotted: the chosen market's tenors, plus any series
+   pulled in from other markets. */
+function activeSeries() {
+  const m = curveMeta();
+  const own = m ? state.tenors.map(t => ({
+    key: seriesKey(m.curve, t), curve: m.curve, tenor: t, label: `${m.label} ${t}`,
+  })) : [];
+  const overlay = state.compare.map(key => {
+    const [curve, tenor] = key.split("|");
+    const cm = state.meta.find(x => x.curve === curve);
+    return { key, curve, tenor, label: `${cm ? cm.label : curve} ${tenor}` };
+  });
+  // Trim the tenor list, not the comparisons. The tenors are usually just the
+  // defaults this market loaded with, whereas a comparison was picked on
+  // purpose, so cutting the combined tail would drop the very series the
+  // reader came for.
+  const kept = overlay.slice(0, MAX_SERIES);
+  return own.slice(0, Math.max(0, MAX_SERIES - kept.length)).concat(kept);
+}
 
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 3) => v === null || v === undefined ? "–" : v.toFixed(d);
@@ -331,16 +369,16 @@ async function getJSON(url) {
 
 /* Assign a stable palette slot. Deselecting a tenor frees its slot but never
    repaints the tenors that remain on screen. */
-function slotFor(tenor) {
-  if (state.slots[tenor] !== undefined) return state.slots[tenor];
-  const taken = new Set(state.tenors.map(t => state.slots[t]).filter(v => v !== undefined));
+function slotFor(key) {
+  if (state.slots[key] !== undefined) return state.slots[key];
+  const taken = new Set(activeSeries().map(s => state.slots[s.key]).filter(v => v !== undefined));
   for (let i = 0; i < MAX_SERIES; i++) {
-    if (!taken.has(i)) { state.slots[tenor] = i; return i; }
+    if (!taken.has(i)) { state.slots[key] = i; return i; }
   }
-  state.slots[tenor] = 0;
+  state.slots[key] = 0;
   return 0;
 }
-const colorOf = (tenor) => `var(${SERIES[slotFor(tenor)]})`;
+const colorOf = (key) => `var(${SERIES[slotFor(key)]})`;
 
 /* ---------------- alerts ---------------- */
 
@@ -512,6 +550,9 @@ function renderControls() {
     state.curve = b.dataset.curve;
     state.slots = {};
     state.tenors = defaultTenors();
+    // A comparison against the market you just switched to would double the
+    // same line, so those entries are dropped rather than left duplicating.
+    state.compare = state.compare.filter(k => !k.startsWith(state.curve + "|"));
     renderControls(); loadSeries(); loadShape();
   };
 
@@ -527,7 +568,7 @@ function renderControls() {
   const live = new Set((m && m.active_tenors) || []);
   $("tenorPick").innerHTML = (m ? m.tenors : []).map(t => {
     const on = state.tenors.includes(t);
-    const style = on ? `style="color:${colorOf(t)}"` : "";
+    const style = on ? `style="color:${colorOf(seriesKey(m.curve, t))}"` : "";
     const dead = !live.has(t);
     return `<button class="tchip${dead ? " dead" : ""}" data-tenor="${t}" aria-pressed="${on}" ${style}
               ${dead ? 'title="No longer published - historical data only"' : ""}>
@@ -536,18 +577,52 @@ function renderControls() {
   $("tenorPick").onclick = (e) => {
     const b = e.target.closest("button"); if (!b) return;
     const t = b.dataset.tenor;
+    const room = MAX_SERIES - state.compare.length;
     if (state.tenors.includes(t)) {
       state.tenors = state.tenors.filter(x => x !== t);
-      delete state.slots[t];
+      delete state.slots[seriesKey(m.curve, t)];
     } else {
-      if (state.tenors.length >= MAX_SERIES) {
-        const dropped = state.tenors.shift();
-        delete state.slots[dropped];
+      while (state.tenors.length >= Math.max(1, room)) {
+        delete state.slots[seriesKey(m.curve, state.tenors.shift())];
       }
       state.tenors.push(t);
-      slotFor(t);
+      slotFor(seriesKey(m.curve, t));
     }
     state.tenors.sort((a, b2) => m.tenors.indexOf(a) - m.tenors.indexOf(b2));
+    renderControls(); loadSeries();
+  };
+
+  // Every tenor of every other market, so the gap between, say, USD SOFR and
+  // PHP BVAL can be read straight off one chart.
+  const options = state.meta
+    .filter(x => !m || x.curve !== m.curve)
+    .flatMap(x => ((x.active_tenors && x.active_tenors.length) ? x.active_tenors : x.tenors)
+      .map(t => ({ key: seriesKey(x.curve, t), label: `${x.label} ${t}` })))
+    .filter(o => !state.compare.includes(o.key));
+  $("comparePick").innerHTML =
+    `<option value="">Add a market…</option>` +
+    options.map(o => `<option value="${o.key}">${o.label}</option>`).join("");
+  $("comparePick").disabled = !options.length;
+  $("comparePick").onchange = (e) => {
+    const key = e.target.value;
+    if (!key) return;
+    if (state.compare.length >= MAX_SERIES) state.compare.shift();
+    state.compare.push(key);
+    renderControls(); loadSeries();
+  };
+
+  $("compareChips").innerHTML = state.compare.map(key => {
+    const [curve, tenor] = key.split("|");
+    const cm = state.meta.find(x => x.curve === curve);
+    return `<button class="tchip" data-key="${key}" aria-pressed="true"
+              style="color:${colorOf(key)}" title="Remove from the chart">
+              <span class="dot"></span>${cm ? cm.label : curve} ${tenor}<span class="x">&times;</span>
+            </button>`;
+  }).join("");
+  $("compareChips").onclick = (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    state.compare = state.compare.filter(k => k !== b.dataset.key);
+    delete state.slots[b.dataset.key];
     renderControls(); loadSeries();
   };
 
@@ -584,18 +659,26 @@ function defaultTenors() {
 /* ---------------- history chart ---------------- */
 
 async function loadSeries() {
-  const m = curveMeta();
-  if (!m || !state.tenors.length) { $("chart").innerHTML = `<p class="empty">Select at least one tenor.</p>`;
-    $("legend").innerHTML = ""; return; }
-  const end = m.last_date || iso(new Date());
+  const series = activeSeries();
+  if (!series.length) { $("chart").innerHTML = `<p class="empty">Select at least one tenor.</p>`;
+    $("legend").innerHTML = ""; renderTable(); return; }
+
+  // The window ends at the newest date any market on the chart has published,
+  // so a market that is a day behind is not cropped off the right edge.
+  const ends = series
+    .map(s2 => (state.meta.find(x => x.curve === s2.curve) || {}).last_date)
+    .filter(Boolean);
+  const end = ends.length ? ends.reduce((a, b) => (a > b ? a : b)) : iso(new Date());
   let start = "1900-01-01";
   if (state.range) {
     const d = new Date(end + "T00:00:00Z");
     d.setUTCDate(d.getUTCDate() - state.range);
     start = iso(d);
   }
+  const spec = series.map(s2 => `${s2.curve}:${s2.tenor}`).join(",");
   state.data = await getJSON(
-    `/api/series?curve=${m.curve}&tenors=${state.tenors.join(",")}&start=${start}&end=${end}`);
+    `/api/series?series=${encodeURIComponent(spec)}&start=${start}&end=${end}`);
+  state.series = series;          // what was actually drawn, after the cap
   drawSeries();
   renderTable();
 }
@@ -607,8 +690,14 @@ function drawSeries() {
   const W = 1000, H = 340, P = { t: 14, r: 62, b: 30, l: 46 };
   const iw = W - P.l - P.r, ih = H - P.t - P.b;
 
+  const series = state.series.length ? state.series : activeSeries();
+  // Short labels while one market is on the chart; qualified once more than
+  // one is, because "3M" no longer says whose 3M it is.
+  const mixed = new Set(series.map(s2 => s2.curve)).size > 1;
+  const nameOf = (s2) => (mixed ? s2.label : s2.tenor);
+
   const vals = [];
-  state.tenors.forEach(t => (d.series[t] || []).forEach(v => v !== null && vals.push(v)));
+  series.forEach(s2 => (d.series[s2.key] || []).forEach(v => v !== null && vals.push(v)));
   if (!vals.length) { host.innerHTML = `<p class="empty">No data in this range.</p>`; return; }
   let lo = Math.min(...vals), hi = Math.max(...vals);
   const pad = (hi - lo) * 0.12 || 0.1;
@@ -639,7 +728,7 @@ function drawSeries() {
   };
 
   let svg = `<svg viewBox="0 0 ${W} ${H}" role="img"
-    aria-label="${curveMeta().label} rate history by tenor">`;
+    aria-label="Rate history: ${series.map(nameOf).join(", ")}">`;
 
   ticks.forEach(v => {
     svg += `<line class="gridline" x1="${P.l}" y1="${Y(v).toFixed(1)}" x2="${P.l+iw}" y2="${Y(v).toFixed(1)}"/>`;
@@ -654,8 +743,8 @@ function drawSeries() {
     svg += `<text class="tick" x="${X(i).toFixed(1)}" y="${P.t+ih+18}" text-anchor="middle">${lbl}</text>`;
   });
 
-  state.tenors.forEach(t => {
-    const arr = d.series[t] || [];
+  series.forEach(s2 => {
+    const arr = d.series[s2.key] || [];
     let path = "", pen = false, lastI = -1;
     arr.forEach((v, i) => {
       if (v === null) { pen = false; return; }
@@ -663,10 +752,12 @@ function drawSeries() {
       pen = true; lastI = i;
     });
     if (!path) return;
-    svg += `<path class="line" d="${path.trim()}" stroke="${colorOf(t)}"/>`;
+    svg += `<path class="line" d="${path.trim()}" stroke="${colorOf(s2.key)}"/>`;
     if (lastI >= 0) {
+      // The end label stays short even when qualified elsewhere: there is only
+      // 62px of right margin and the tenor is what identifies the line there.
       svg += `<text class="endlabel" x="${P.l+iw+8}" y="${(Y(arr[lastI])+4).toFixed(1)}"
-               fill="${colorOf(t)}">${t} ${fmt(arr[lastI], 2)}</text>`;
+               fill="${colorOf(s2.key)}">${s2.tenor} ${fmt(arr[lastI], 2)}</text>`;
     }
   });
 
@@ -676,8 +767,8 @@ function drawSeries() {
   svg += `</svg>`;
   host.innerHTML = svg;
 
-  $("legend").innerHTML = state.tenors.map(t =>
-    `<span><i style="background:${colorOf(t)}"></i>${t}</span>`).join("");
+  $("legend").innerHTML = series.map(s2 =>
+    `<span><i style="background:${colorOf(s2.key)}"></i>${s2.label}</span>`).join("");
 
   attachCrosshair(host, d, X, n, P, ih);
 }
@@ -700,10 +791,10 @@ function attachCrosshair(host, d, X, n, P, ih) {
     line.setAttribute("x1", X(i).toFixed(1));
     line.setAttribute("x2", X(i).toFixed(1));
 
-    const rows = state.tenors.map(t => {
-      const v = (d.series[t] || [])[i];
+    const rows = (state.series.length ? state.series : activeSeries()).map(s2 => {
+      const v = (d.series[s2.key] || [])[i];
       return `<div class="r"><i style="display:inline-block;width:10px;height:3px;border-radius:2px;
-              background:${colorOf(t)}"></i>${t}<b>${fmt(v)}%</b></div>`;
+              background:${colorOf(s2.key)}"></i>${s2.label}<b>${fmt(v)}%</b></div>`;
     }).join("");
     tip.innerHTML = `<div class="d">${niceDate(d.dates[i])}</div>${rows}`;
     tip.classList.add("on");
@@ -724,11 +815,12 @@ function renderTable() {
   const d = state.data, host = $("dataview");
   host.hidden = !state.tableView;
   if (!state.tableView || !d) return;
-  const head = `<tr><th>Date</th>${state.tenors.map(t => `<th>${t}</th>`).join("")}</tr>`;
+  const series = state.series.length ? state.series : activeSeries();
+  const head = `<tr><th>Date</th>${series.map(s2 => `<th>${s2.label}</th>`).join("")}</tr>`;
   const rows = d.dates.slice().reverse().map((dt, ri) => {
     const i = d.dates.length - 1 - ri;
-    return `<tr><td>${dt}</td>${state.tenors.map(t =>
-      `<td>${fmt((d.series[t] || [])[i])}</td>`).join("")}</tr>`;
+    return `<tr><td>${dt}</td>${series.map(s2 =>
+      `<td>${fmt((d.series[s2.key] || [])[i])}</td>`).join("")}</tr>`;
   }).join("");
   host.innerHTML = `<table><thead>${head}</thead><tbody>${rows}</tbody></table>`;
 }

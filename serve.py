@@ -140,24 +140,70 @@ def get_latest(conn, curve):
             "headlines": db.headline_tenors(curve, [r["tenor"] for r in rows])}
 
 
+# A plotted line is identified by curve and tenor together, because "3M" alone
+# is ambiguous once KLIBOR, MYOR and THOR can share a chart.
+SERIES_SEP = "|"
+
+
+def series_key(curve, tenor):
+    return f"{curve}{SERIES_SEP}{tenor}"
+
+
+def get_series_pairs(conn, pairs, start, end):
+    """Aligned time series for any mix of curves and tenors.
+
+    A shared date axis with None for gaps, so the front end never has to
+    reconcile differing publication calendars. That matters more here than for
+    a single curve: a Philippine holiday, a Malaysian one and a US one fall on
+    different days, so a union axis will always be sparser than any one source.
+
+    Returns labels alongside the data because "3M" on its own does not say
+    whose 3M it is once several markets are on the same chart.
+    """
+    if not pairs:
+        return {"dates": [], "series": {}, "labels": {}}
+
+    collected, all_dates = {}, set()
+    for curve, tenor in pairs:
+        rows = conn.execute(
+            "SELECT rate_date, rate FROM rates WHERE curve=? AND tenor=? "
+            "AND rate_date BETWEEN ? AND ? ORDER BY rate_date",
+            (curve, tenor, start, end)).fetchall()
+        values = {r["rate_date"]: r["rate"] for r in rows}
+        collected[series_key(curve, tenor)] = values
+        all_dates.update(values)
+
+    dates = sorted(all_dates)
+    return {
+        "dates": dates,
+        "series": {key: [vals.get(d) for d in dates] for key, vals in collected.items()},
+        "labels": {series_key(c, t): f"{db.CURVES[c]['label']} {t}" for c, t in pairs},
+    }
+
+
 def get_series(conn, curve, tenors, start, end):
-    """Aligned time series: a shared date axis with None for gaps, so the
-    front end never has to reconcile differing publication calendars."""
+    """Single-curve view, keyed by plain tenor. Kept as-is: the term structure
+    panel and the existing callers have no use for the curve prefix."""
     if not tenors:
         return {"dates": [], "series": {}}
-    marks = ",".join("?" * len(tenors))
-    params = [curve] + list(tenors) + [start, end]
-    rows = conn.execute(
-        f"SELECT rate_date, tenor, rate FROM rates "
-        f"WHERE curve=? AND tenor IN ({marks}) AND rate_date BETWEEN ? AND ? "
-        f"ORDER BY rate_date", params).fetchall()
+    full = get_series_pairs(conn, [(curve, t) for t in tenors], start, end)
+    return {"dates": full["dates"],
+            "series": {t: full["series"][series_key(curve, t)] for t in tenors}}
 
-    dates = sorted({r["rate_date"] for r in rows})
-    index = {d: i for i, d in enumerate(dates)}
-    series = {t: [None] * len(dates) for t in tenors}
-    for r in rows:
-        series[r["tenor"]][index[r["rate_date"]]] = r["rate"]
-    return {"dates": dates, "series": series}
+
+def parse_series_spec(spec):
+    """"SOFR:90D,KLIBOR:3M" -> [("SOFR", "90D"), ("KLIBOR", "3M")].
+
+    Unknown curves are dropped rather than raising: a stale bookmark naming a
+    curve that has since been renamed should draw the rest of the chart, not
+    fail the request.
+    """
+    pairs = []
+    for item in (spec or "").split(","):
+        curve, sep, tenor = item.partition(":")
+        if sep and curve in db.CURVES and tenor and (curve, tenor) not in pairs:
+            pairs.append((curve, tenor))
+    return pairs
 
 
 def get_curve_shape(conn, curve, date):
@@ -272,12 +318,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(get_latest(conn, curve))
 
             if route == "/api/series":
+                start = q.get("start") or "1900-01-01"
+                end = q.get("end") or datetime.date.today().isoformat()
+                # Cross-curve form, used by the history chart so SOFR can be
+                # plotted against BVAL, MGS and the rest on one axis.
+                if q.get("series"):
+                    pairs = parse_series_spec(q["series"])
+                    return self._json(get_series_pairs(conn, pairs, start, end))
                 curve = q.get("curve")
                 if curve not in db.CURVES:
                     return self._json({"error": "unknown curve"}, 400)
                 tenors = [t for t in (q.get("tenors") or "").split(",") if t]
-                start = q.get("start") or "1900-01-01"
-                end = q.get("end") or datetime.date.today().isoformat()
                 return self._json(get_series(conn, curve, tenors, start, end))
 
             if route == "/api/shape":

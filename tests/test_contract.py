@@ -1003,6 +1003,90 @@ class TestCarryForwardOfHeadlineTenors(unittest.TestCase):
                          ["O/N", "30D", "90D", "180D"])
 
 
+class TestCrossCurveSeries(unittest.TestCase):
+    """One chart can hold series from several markets, so a line is identified
+    by curve and tenor together."""
+
+    def _conn(self):
+        conn = memory_db()
+        # Deliberately different publication calendars: SOFR is quiet on 18 Aug,
+        # KLIBOR on 17 Aug. A union axis has to hold both.
+        db.upsert_rates(conn, "SOFR", [
+            ("2026-08-14", "90D", 3.63113), ("2026-08-17", "90D", 3.63370)])
+        db.upsert_rates(conn, "KLIBOR", [
+            ("2026-08-14", "3M", 3.46), ("2026-08-18", "3M", 3.47)])
+        return conn
+
+    def test_keys_carry_the_curve(self):
+        self.assertEqual(serve.series_key("SOFR", "90D"), "SOFR|90D")
+
+    def test_the_axis_is_the_union_of_every_calendar(self):
+        d = serve.get_series_pairs(
+            self._conn(), [("SOFR", "90D"), ("KLIBOR", "3M")],
+            "2026-08-01", "2026-08-31")
+        self.assertEqual(d["dates"], ["2026-08-14", "2026-08-17", "2026-08-18"])
+
+    def test_a_market_that_did_not_publish_reads_as_a_gap(self):
+        """None, not a carried value. A flat segment across a holiday would
+        look like a rate that held when it simply was not quoted."""
+        d = serve.get_series_pairs(
+            self._conn(), [("SOFR", "90D"), ("KLIBOR", "3M")],
+            "2026-08-01", "2026-08-31")
+        self.assertEqual(d["series"]["SOFR|90D"], [3.63113, 3.63370, None])
+        self.assertEqual(d["series"]["KLIBOR|3M"], [3.46, None, 3.47])
+
+    def test_labels_name_the_market(self):
+        """"3M" alone does not say whose 3M once KLIBOR, MYOR and THOR can
+        share a chart."""
+        d = serve.get_series_pairs(
+            self._conn(), [("SOFR", "90D"), ("KLIBOR", "3M")],
+            "2026-08-01", "2026-08-31")
+        self.assertEqual(d["labels"],
+                         {"SOFR|90D": "USD SOFR 90D", "KLIBOR|3M": "MYR KLIBOR 3M"})
+
+    def test_no_pairs_is_empty_not_an_error(self):
+        d = serve.get_series_pairs(self._conn(), [], "2026-08-01", "2026-08-31")
+        self.assertEqual(d, {"dates": [], "series": {}, "labels": {}})
+
+    def test_single_curve_view_still_keys_on_plain_tenors(self):
+        """The term structure panel and the existing callers have no use for
+        the curve prefix, so that contract is unchanged."""
+        d = serve.get_series(self._conn(), "SOFR", ["90D"], "2026-08-01", "2026-08-31")
+        self.assertEqual(sorted(d["series"]), ["90D"])
+        self.assertEqual(d["dates"], ["2026-08-14", "2026-08-17"])
+
+
+class TestSeriesSpecParsing(unittest.TestCase):
+    """The chart passes its selection as CURVE:TENOR pairs in the query string."""
+
+    def test_a_normal_spec(self):
+        self.assertEqual(serve.parse_series_spec("SOFR:90D,KLIBOR:3M"),
+                         [("SOFR", "90D"), ("KLIBOR", "3M")])
+
+    def test_order_is_preserved(self):
+        """It drives the palette, so a reorder would repaint every line."""
+        self.assertEqual([c for c, _ in serve.parse_series_spec("MGS:10Y,BVAL:5Y,SOFR:O/N")],
+                         ["MGS", "BVAL", "SOFR"])
+
+    def test_a_tenor_containing_a_slash_survives(self):
+        """O/N is a real tenor and must not be mangled by the split."""
+        self.assertEqual(serve.parse_series_spec("SOFR:O/N"), [("SOFR", "O/N")])
+
+    def test_an_unknown_curve_is_dropped_not_fatal(self):
+        """A stale bookmark naming a renamed curve should still draw the rest."""
+        self.assertEqual(serve.parse_series_spec("NOPE:3M,SOFR:90D"), [("SOFR", "90D")])
+
+    def test_duplicates_collapse(self):
+        self.assertEqual(serve.parse_series_spec("SOFR:90D,SOFR:90D"), [("SOFR", "90D")])
+
+    def test_malformed_entries_are_ignored(self):
+        self.assertEqual(serve.parse_series_spec("SOFR,:,,SOFR:,:90D"), [])
+
+    def test_empty_input(self):
+        self.assertEqual(serve.parse_series_spec(""), [])
+        self.assertEqual(serve.parse_series_spec(None), [])
+
+
 class TestThreadSafety(unittest.TestCase):
     """The hosted dashboard reruns its script on a different thread every time a
     widget changes. A connection shared across those threads raises
