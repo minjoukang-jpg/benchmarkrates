@@ -16,6 +16,7 @@ byte-for-byte.
 import contextlib
 import datetime
 import hashlib
+import importlib
 import os
 import tempfile
 
@@ -25,6 +26,42 @@ import streamlit as st
 
 import db
 import serve
+
+
+def _reload_if_stale(module):
+    """Return `module`, re-imported if the file on disk has changed under it.
+
+    Streamlit re-executes this script on every rerun, but Python caches imported
+    modules in sys.modules. After a deploy the process can therefore end up
+    running the new streamlit_app.py against the db.py it imported before the
+    update. Anything added to db.py in the same commit is then missing, and
+    because this script calls it at module level the AttributeError takes the
+    whole page down rather than degrading one section. That is exactly how the
+    market_layout() deploy went down.
+
+    Comparing the file's hash against a stamp left on the module object catches
+    it generically, so this does not need touching each time db.py gains a
+    function. The reload costs a few milliseconds and happens once per change.
+
+    This has to live here rather than in db.py: a stale db.py is the failure
+    being recovered from, so it cannot be the thing holding the recovery.
+    """
+    path = getattr(module, "__file__", "")
+    if not path or not os.path.exists(path):
+        return module
+    with open(path, "rb") as fh:
+        stamp = hashlib.sha1(fh.read()).hexdigest()
+    if getattr(module, "_source_stamp", None) == stamp:
+        return module
+    module = importlib.reload(module)
+    module._source_stamp = stamp
+    return module
+
+
+# Order matters: serve.py binds db.export_csv at import time, so db has to be
+# current before serve is rebuilt against it.
+db = _reload_if_stale(db)
+serve = _reload_if_stale(serve)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rates.db")
 
@@ -44,6 +81,20 @@ alt.data_transformers.disable_max_rows()
 
 st.set_page_config(page_title="Benchmark Rates", page_icon="chart_with_upwards_trend",
                    layout="wide")
+
+# If the reload above could not recover, say so plainly. Streamlit redacts the
+# real exception on Cloud, so an unguarded AttributeError here reads only as
+# "This app has encountered an error", which says nothing about the fix.
+_missing = [name for name in ("market_layout", "headline_tenors", "export_csv")
+            if not hasattr(db, name)]
+if _missing:
+    st.error(
+        "**This deployment is running a stale copy of db.py.** Missing: "
+        + ", ".join(_missing)
+        + ". Reboot the app from Manage app in the lower right, which restarts "
+          "the process against the current files. The stored data is not "
+          "affected.")
+    st.stop()
 
 
 # --------------------------------------------------------------------------
