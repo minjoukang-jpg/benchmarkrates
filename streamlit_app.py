@@ -267,17 +267,24 @@ for col, (market, flag, curve_names) in zip(st.columns(len(groups)), groups):
                 continue
             latest = load_latest(FP, curve)
             rows = latest["rows"]
-            # Which tenor headlines the card is declared per curve in db.CURVES
-            # and resolved by get_latest, so both dashboards agree.
-            head = next((r for r in rows if r["tenor"] == latest["headline"]), rows[0])
-            change = head["change_bp"]
-            st.metric(
-                label=f"{m['label']} · {head['tenor']}",
-                value=f"{head['rate']:.3f}%",
-                delta=None if change is None else f"{change:+.1f} bp",
-                # A rising benchmark raises borrowing cost, so a rise reads red.
-                # An unchanged rate stays neutral rather than as a red rise.
-                delta_color="off" if not change else "inverse")
+            by_tenor = {r["tenor"]: r for r in rows}
+            # Which tenors headline the card is declared per curve in db.CURVES
+            # and resolved by get_latest, so both dashboards agree. Usually one,
+            # but PHP BVAL shows 3Y, 5Y and 7Y side by side.
+            heads = [by_tenor[t] for t in latest["headlines"] if t in by_tenor] or [rows[0]]
+
+            st.markdown(f"**{m['label']}**")
+            for head, hcol in zip(heads, st.columns(len(heads))):
+                change = head["change_bp"]
+                with hcol:
+                    st.metric(
+                        label=head["tenor"],
+                        value=f"{head['rate']:.3f}%",
+                        delta=None if change is None else f"{change:+.1f} bp",
+                        # A rising benchmark raises borrowing cost, so a rise
+                        # reads red. An unchanged rate stays neutral rather
+                        # than showing as a red rise.
+                        delta_color="off" if not change else "inverse")
             st.caption(f"{nice_date(latest['date'])} · {m['source']}")
 
             frame = pd.DataFrame([{

@@ -88,7 +88,10 @@ def get_latest(conn, curve):
     publication date for that same tenor."""
     last = db.latest_date(conn, curve)
     if not last:
-        return {"curve": curve, "date": None, "rows": []}
+        # Same keys as the populated case. A curve with no data yet is normal -
+        # one just added, or one whose source has never published - and callers
+        # should not have to special-case the shape.
+        return {"curve": curve, "date": None, "rows": [], "headlines": []}
 
     rows = []
     for r in conn.execute(
@@ -107,8 +110,9 @@ def get_latest(conn, curve):
     rows.sort(key=lambda x: db.tenor_sort_key(x["tenor"]))
     return {"curve": curve, "date": last, "rows": rows,
             # Resolved server-side so the local and hosted dashboards always
-            # show the same headline figure.
-            "headline": db.headline_tenor(curve, [r["tenor"] for r in rows])}
+            # show the same headline figures. A list: a market often quotes
+            # several tenors together.
+            "headlines": db.headline_tenors(curve, [r["tenor"] for r in rows])}
 
 
 def get_series(conn, curve, tenors, start, end):

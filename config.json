@@ -18,6 +18,7 @@
     "MGII": 3,
     "MYOR": 4,
     "MYORI": 4,
+    "THOR": 4,
     "SOFR": 4
   },
   "_myor_tolerance_note": "MYOR and MYOR-i are published one business day after the reference date, like SOFR, so they get the same wider tolerance.",

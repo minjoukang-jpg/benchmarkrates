@@ -109,9 +109,14 @@ button.primary { background: var(--series-1); color: #fff; border-color: transpa
 .swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; align-self: center; }
 .card h2 { font-size: 15px; font-weight: 600; margin: 0; }
 .card .meta { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
-.hero { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
-.hero .val { font-size: 30px; font-weight: 620; letter-spacing: -0.02em; line-height: 1; }
-.hero .lbl { font-size: 12px; color: var(--text-secondary); }
+/* One block per headline tenor. A market often quotes several together, so
+   they sit in a row and wrap when the column is narrow. */
+.heroes { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-bottom: 12px; }
+.hero { display: flex; flex-direction: column; gap: 1px; }
+.hero .val { font-size: 26px; font-weight: 620; letter-spacing: -0.02em; line-height: 1.1; }
+.hero .lbl { font-size: 11px; color: var(--text-secondary); font-weight: 600; }
+.hero .chg { font-size: 11px; font-variant-numeric: tabular-nums; }
+.heroes .asof { width: 100%; margin: 2px 0 0; font-size: 12px; color: var(--text-muted); }
 
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th, td { text-align: right; padding: 5px 0; font-size: 13px; }
@@ -349,8 +354,7 @@ function buildCard(m, i) {
     </div>
     <p class="meta">${m.rows.toLocaleString()} observations
        &middot; from ${m.first_date ? niceDate(m.first_date) : "–"}</p>
-    <div class="hero"><span class="val" id="hero-${m.curve}">&ndash;</span>
-      <span class="lbl" id="herolbl-${m.curve}"></span></div>
+    <div class="heroes" id="heroes-${m.curve}"></div>
     <div id="tbl-${m.curve}"></div>`;
   return card;
 }
@@ -358,11 +362,23 @@ function buildCard(m, i) {
 async function loadCardTable(m) {
   if (!m.rows) { $("tbl-" + m.curve).innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const d = await getJSON(`/api/latest?curve=${m.curve}`);
-  // Which tenor headlines the card is declared per curve in db.CURVES and
-  // resolved by the API, so both dashboards agree.
-  const head = d.rows.find(r => r.tenor === d.headline) || d.rows[0];
-  $("hero-" + m.curve).textContent = fmt(head.rate) + "%";
-  $("herolbl-" + m.curve).textContent = `${head.tenor} · ${niceDate(d.date)}`;
+  // Which tenors headline the card is declared per curve in db.CURVES and
+  // resolved by the API, so both dashboards agree. Usually one, but PHP BVAL
+  // shows 3Y, 5Y and 7Y side by side.
+  const byTenor = Object.fromEntries(d.rows.map(r => [r.tenor, r]));
+  const heads = (d.headlines || []).map(t => byTenor[t]).filter(Boolean);
+  if (!heads.length && d.rows.length) heads.push(d.rows[0]);
+
+  $("heroes-" + m.curve).innerHTML = heads.map(h => {
+    const c = h.change_bp;
+    const cls = c === null ? "chg-flat" : c > 0 ? "chg-rise" : c < 0 ? "chg-fall" : "chg-flat";
+    const txt = c === null ? "" : `${c > 0 ? "+" : ""}${c.toFixed(1)} bp`;
+    return `<div class="hero">
+              <span class="val">${fmt(h.rate)}%</span>
+              <span class="lbl">${h.tenor}</span>
+              <span class="chg ${cls}">${txt}</span>
+            </div>`;
+  }).join("") + `<p class="asof">${niceDate(d.date)}</p>`;
 
   const body = d.rows.map(r => {
     const c = r.change_bp;

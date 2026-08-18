@@ -103,13 +103,23 @@ class TestOutputContract(unittest.TestCase):
             self.assertIn(key, meta, f"/api/meta lost the '{key}' field")
 
         latest = serve.get_latest(conn, "SOFR")
-        for key in ("curve", "date", "rows", "headline"):
+        for key in ("curve", "date", "rows", "headlines"):
             self.assertIn(key, latest, f"/api/latest lost the '{key}' field")
         for key in ("tenor", "rate", "prev_rate", "prev_date", "change_bp"):
             self.assertIn(key, latest["rows"][0])
 
         series = serve.get_series(conn, "SOFR", ["O/N"], "2026-01-01", "2026-12-31")
         self.assertEqual(set(series), {"dates", "series"})
+
+    def test_get_latest_shape_is_the_same_with_no_data(self):
+        """A curve that has never published must return the same keys, or every
+        caller has to special-case it. This bit when THOR was first added."""
+        conn = memory_db()
+        empty = serve.get_latest(conn, "THOR")
+        populated_keys = {"curve", "date", "rows", "headlines"}
+        self.assertEqual(set(empty), populated_keys)
+        self.assertEqual(empty["rows"], [])
+        self.assertEqual(empty["headlines"], [])
 
 
 # ==========================================================================
@@ -325,6 +335,61 @@ class TestMyorParsing(unittest.TestCase):
             sources.parse_myor_html(table)
 
 
+THOR_PAYLOAD = [
+    {"asof": "2024-03-15T00:00:00", "code": "THOR", "tenor": "O/N", "rate": 2.49426},
+    {"asof": "2026-08-17T00:00:00", "code": "THORA", "tenor": "1M", "rate": 0.99243},
+    {"asof": "2026-08-17T00:00:00", "code": "THORA", "tenor": "3M", "rate": 0.99394},
+    {"asof": "2026-08-17T00:00:00", "code": "THORA", "tenor": "6M", "rate": 1.00677},
+]
+
+
+class TestThorParsing(unittest.TestCase):
+    """ThaiBMA honours the asof parameter for the overnight rate but ignores it
+    for the compounded averages, which always return the latest values. Each row
+    must therefore be dated by its own asof field."""
+
+    def test_each_row_uses_its_own_asof(self):
+        rows = sources.parse_thor(THOR_PAYLOAD, datetime.date(2024, 3, 15))
+        self.assertEqual(
+            {(d, t): r for d, t, r in rows},
+            {("2024-03-15", "O/N"): 2.49426,
+             ("2026-08-17", "1M"): 0.99243,
+             ("2026-08-17", "3M"): 0.99394,
+             ("2026-08-17", "6M"): 1.00677})
+
+    def test_query_date_never_stamped_on_the_averages(self):
+        """The corruption case. Using the requested date would write today's
+        average rates onto every historical date in a backfill."""
+        rows = sources.parse_thor(THOR_PAYLOAD, datetime.date(2024, 3, 15))
+        stamped = [(d, t) for d, t, _ in rows if d == "2024-03-15" and t != "O/N"]
+        self.assertEqual(stamped, [],
+                         "an average was dated with the requested date")
+
+    def test_overnight_keeps_its_historical_date(self):
+        rows = sources.parse_thor(THOR_PAYLOAD, datetime.date(2024, 3, 15))
+        overnight = [(d, r) for d, t, r in rows if t == "O/N"]
+        self.assertEqual(overnight, [("2024-03-15", 2.49426)])
+
+    def test_non_list_payload_raises(self):
+        with self.assertRaises(sources.FetchError):
+            sources.parse_thor({"error": "nope"}, datetime.date(2026, 8, 14))
+
+    def test_unparsable_asof_raises(self):
+        bad = [{"asof": "not-a-date", "code": "THOR", "tenor": "O/N", "rate": 1.0}]
+        with self.assertRaises(sources.FetchError):
+            sources.parse_thor(bad, datetime.date(2026, 8, 14))
+
+    def test_rows_without_a_rate_are_skipped(self):
+        payload = [{"asof": "2026-08-17T00:00:00", "code": "THOR",
+                    "tenor": "O/N", "rate": None}]
+        self.assertEqual(sources.parse_thor(payload, datetime.date(2026, 8, 17)), [])
+
+    def test_index_value_would_be_rejected_by_validation(self):
+        """thor-index returns a compounding index around 108, not a rate."""
+        with self.assertRaises(sources.FetchError):
+            sources.validate_rows("THOR", [("2026-08-17", "O/N", 108.78)])
+
+
 class TestValidation(unittest.TestCase):
 
     def test_accepts_good_data(self):
@@ -538,9 +603,9 @@ class TestCsvRoundTrip(unittest.TestCase):
 class TestMarketLayout(unittest.TestCase):
     """Cards are grouped into market columns, left to right, each with a flag."""
 
-    def test_order_is_philippines_malaysia_united_states(self):
+    def test_columns_run_west_to_east_then_the_us(self):
         self.assertEqual([m for m, _, _ in db.curves_by_market()],
-                         ["Philippines", "Malaysia", "United States"])
+                         ["Philippines", "Malaysia", "Thailand", "United States"])
 
     def test_every_curve_lands_in_exactly_one_column(self):
         placed = [c for _, _, curves in db.curves_by_market() for c in curves]
@@ -583,34 +648,46 @@ class TestMarketLayout(unittest.TestCase):
                          "vertices must alternate between inner and outer radius")
 
 
-class TestHeadlineTenor(unittest.TestCase):
-    """The big figure on each card is declared per curve, not inferred."""
+class TestHeadlineTenors(unittest.TestCase):
+    """The big figures on each card are declared per curve, not inferred."""
 
-    def test_declared_tenor_is_used(self):
+    def test_bval_shows_three_year_five_year_and_seven_year(self):
         self.assertEqual(
-            db.headline_tenor("BVAL", ["1M", "3M", "5Y", "10Y", "25Y"]), "5Y")
-        self.assertEqual(db.headline_tenor("MGS", ["3Y", "5Y", "7Y", "10Y"]), "10Y")
-        self.assertEqual(db.headline_tenor("KLIBOR", ["1M", "3M", "6M"]), "6M")
-        self.assertEqual(db.headline_tenor("SOFR", ["O/N"]), "O/N")
+            db.headline_tenors("BVAL", ["1M", "3M", "3Y", "5Y", "7Y", "10Y", "25Y"]),
+            ["3Y", "5Y", "7Y"])
 
-    def test_every_curve_declares_one(self):
+    def test_single_headline_curves_return_one(self):
+        self.assertEqual(db.headline_tenors("MGS", ["3Y", "5Y", "7Y", "10Y"]), ["10Y"])
+        self.assertEqual(db.headline_tenors("KLIBOR", ["1M", "3M", "6M"]), ["6M"])
+        self.assertEqual(db.headline_tenors("SOFR", ["O/N"]), ["O/N"])
+
+    def test_results_are_in_tenor_order(self):
+        out = db.headline_tenors("BVAL", ["7Y", "3Y", "5Y"])
+        self.assertEqual(out, ["3Y", "5Y", "7Y"], "headlines must read short to long")
+
+    def test_every_curve_declares_at_least_one(self):
         for curve, meta in db.CURVES.items():
-            self.assertIn("headline_tenor", meta,
-                          f"{curve} has no declared headline tenor")
+            declared = meta.get("headline_tenors")
+            self.assertTrue(declared, f"{curve} declares no headline tenors")
+            self.assertIsInstance(declared, list)
 
-    def test_declared_tenor_is_valid_for_its_curve(self):
+    def test_declared_tenors_are_valid_for_their_curve(self):
         for curve, meta in db.CURVES.items():
             allowed = sources.CURVE_TENORS.get(curve)
             if allowed:
-                self.assertIn(meta["headline_tenor"], allowed,
-                              f"{curve} headline tenor is not one it publishes")
+                for tenor in meta["headline_tenors"]:
+                    self.assertIn(tenor, allowed,
+                                  f"{curve} headline {tenor} is not one it publishes")
 
-    def test_falls_back_when_not_published_that_day(self):
-        """A discontinued or unpublished tenor must not blank the card."""
-        self.assertEqual(db.headline_tenor("BVAL", ["1M", "3M", "6M"]), "6M")
+    def test_unpublished_headlines_are_dropped_not_blanked(self):
+        """If only some of the declared tenors published, show those."""
+        self.assertEqual(db.headline_tenors("BVAL", ["3Y", "5Y"]), ["3Y", "5Y"])
 
-    def test_empty_returns_none(self):
-        self.assertIsNone(db.headline_tenor("BVAL", []))
+    def test_falls_back_when_none_published_that_day(self):
+        self.assertEqual(db.headline_tenors("BVAL", ["1M", "3M", "6M"]), ["6M"])
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(db.headline_tenors("BVAL", []), [])
 
 
 class TestThreadSafety(unittest.TestCase):

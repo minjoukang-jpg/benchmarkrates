@@ -28,7 +28,7 @@ CURVES = {
         "description": "Bloomberg Valuation benchmark tenors for PHP government securities",
         "source": "PDEx (pds.com.ph)",
         "url": "https://www.pds.com.ph/",
-        "headline_tenor": "5Y",
+        "headline_tenors": ["3Y", "5Y", "7Y"],   # the tenors quoted most often here
     },
     "KLIBOR": {
         "currency": "MYR",
@@ -39,7 +39,7 @@ CURVES = {
         "url": "https://financialmarkets.bnm.gov.my/data-download-klibor",
         # 6M as before. Change to "3M" if you would rather it sit alongside the
         # MYOR 3M card, which makes the KLIBOR-to-MYOR gap visible at a glance.
-        "headline_tenor": "6M",
+        "headline_tenors": ["6M"],
     },
     "MYOR": {
         "currency": "MYR",
@@ -49,7 +49,7 @@ CURVES = {
                         "transitioning to from KLIBOR, with compounded 1M, 3M and 6M averages"),
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-myor",
-        "headline_tenor": "3M",
+        "headline_tenors": ["3M"],
     },
     "MYORI": {
         "currency": "MYR",
@@ -59,13 +59,13 @@ CURVES = {
                         "based on Islamic money market transactions"),
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-myori",
-        "headline_tenor": "3M",
+        "headline_tenors": ["3M"],
     },
     "MGS": {
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGS",
-        "headline_tenor": "10Y",
+        "headline_tenors": ["10Y"],
         "description": "Malaysian Government Securities benchmark closing yields (conventional)",
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
@@ -74,12 +74,22 @@ CURVES = {
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGII (Islamic)",
-        "headline_tenor": "10Y",
+        "headline_tenors": ["10Y"],
         "description": ("Malaysian Government Investment Issues benchmark closing yields. "
                         "This is the Shariah-compliant benchmark, and the correct reference "
                         "for Sukuk rather than conventional MGS"),
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
+    },
+    "THOR": {
+        "currency": "THB",
+        "market": "Thailand",
+        "label": "THB THOR",
+        "headline_tenors": ["3M"],
+        "description": ("Thai Overnight Repurchase Rate, Thailand's transaction-based "
+                        "reference rate, with compounded 1M, 3M and 6M averages"),
+        "source": "ThaiBMA, calculation agent for Bank of Thailand",
+        "url": "https://app.bot.or.th/thor/en",
     },
     "SOFR": {
         "currency": "USD",
@@ -88,12 +98,12 @@ CURVES = {
         "description": "Secured Overnight Financing Rate (overnight, published rate)",
         "source": "Federal Reserve Bank of New York",
         "url": "https://markets.newyorkfed.org/api/rates/secured/sofr/last/1.json",
-        "headline_tenor": "O/N",
+        "headline_tenors": ["O/N"],
     },
 }
 
 # Left-to-right order of the market columns on the dashboards.
-MARKET_ORDER = ["Philippines", "Malaysia", "United States"]
+MARKET_ORDER = ["Philippines", "Malaysia", "Thailand", "United States"]
 
 # Flags drawn as inline SVG rather than emoji. Windows has no flag glyphs, so
 # emoji regional indicators render as a boxed letter pair ("PH") in Chrome on
@@ -135,6 +145,14 @@ MARKET_FLAGS = {
         '<circle cx="6.35" cy="4.55" r="2.45" fill="#010066"/>'
         # The Bintang Persekutuan, a 14-point star, not a ring.
         f'<polygon points="{_star_points(8.95, 4.55, 2.05, 0.95, 14)}" fill="#ffcc00"/>'
+        '</svg>'),
+    # Five bands in 1:1:2:1:1 proportion - red, white, blue, white, red.
+    "Thailand": (
+        f'<svg {_FLAG_VIEWBOX} role="img" aria-label="Thailand">'
+        '<rect width="24" height="16" fill="#f4f5f8"/>'
+        '<rect y="0" width="24" height="2.667" fill="#a51931"/>'
+        '<rect y="5.333" width="24" height="5.333" fill="#2d2a4a"/>'
+        '<rect y="13.333" width="24" height="2.667" fill="#a51931"/>'
         '</svg>'),
     "United States": (
         f'<svg {_FLAG_VIEWBOX} role="img" aria-label="United States">'
@@ -308,21 +326,24 @@ def tenor_sort_key(tenor):
     return TENOR_MONTHS.get(tenor, 9999)
 
 
-def headline_tenor(curve, available):
-    """Which tenor to show as the big figure on a curve's card.
+def headline_tenors(curve, available):
+    """Which tenors to show as the big figures on a curve's card.
 
-    Declared per curve as "headline_tenor" in CURVES so the choice is explicit
-    and in one place, rather than inferred. Falls back to a middle tenor if the
-    preferred one was not published on the latest date.
+    A list, because a market often quotes several: PHP BVAL is usually discussed
+    at 3Y, 5Y and 7Y together. Declared per curve in CURVES so the choice is
+    explicit and in one place rather than inferred. Any declared tenor that was
+    not published on the latest date is dropped, and if none survive it falls
+    back to a middle tenor so the card is never blank.
     """
     tenors = list(available or [])
     if not tenors:
-        return None
-    preferred = CURVES.get(curve, {}).get("headline_tenor")
-    if preferred and preferred in tenors:
-        return preferred
+        return []
+    declared = CURVES.get(curve, {}).get("headline_tenors") or []
+    present = [t for t in declared if t in tenors]
+    if present:
+        return sorted(present, key=tenor_sort_key)
     ordered = sorted(tenors, key=tenor_sort_key)
-    return ordered[min(2, len(ordered) - 1)]
+    return [ordered[min(2, len(ordered) - 1)]]
 
 
 # --------------------------------------------------------------------------

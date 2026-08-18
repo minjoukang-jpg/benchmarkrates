@@ -26,7 +26,7 @@ SOFR_HISTORY_START = datetime.date(2018, 4, 1)
 BENCHMARK_HISTORY_START = datetime.date(2022, 1, 1)
 
 # Curves fetched one trade date at a time, so a backfill walks weekdays.
-PER_DAY_CURVES = ("BVAL", "MGS", "MGII")
+PER_DAY_CURVES = ("BVAL", "MGS", "MGII", "THOR")
 
 
 def _out(msg=""):
@@ -61,7 +61,8 @@ def _fetch(conn, curve, full):
 
     if curve in PER_DAY_CURVES:
         if full:
-            start = BVAL_HISTORY_START if curve == "BVAL" else BENCHMARK_HISTORY_START
+            start = {"BVAL": BVAL_HISTORY_START,
+                     "THOR": sources.THOR_HISTORY_START}.get(curve, BENCHMARK_HISTORY_START)
         else:
             last = db.latest_date(conn, curve)
             start = (datetime.date.fromisoformat(last) + datetime.timedelta(days=1)) if last \
@@ -75,6 +76,8 @@ def _fetch(conn, curve, full):
 
         if curve == "BVAL":
             return sources.fetch_bval_range(start, today, on_progress=progress), None
+        if curve == "THOR":
+            return sources.fetch_thor_range(start, today, on_progress=progress), None
         return sources.fetch_benchmark_range(curve, start, today, on_progress=progress), None
 
     raise ValueError(f"unknown curve {curve}")

@@ -60,6 +60,7 @@ CURVE_TENORS = {
     "MYORI": {"O/N", "1M", "3M", "6M"},
     "MGS": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
     "MGII": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
+    "THOR": {"O/N", "1M", "3M", "6M"},
     "SOFR": {"O/N"},
 }
 RATE_MIN, RATE_MAX = 0.0, 30.0
@@ -714,6 +715,99 @@ def fetch_benchmark_range(curve, start, end, pause=0.3, on_progress=None):
 
 
 # --------------------------------------------------------------------------
+# THB THOR - ThaiBMA, the calculation agent for Bank of Thailand
+#
+# One request per date. The response mixes two series:
+#   code "THOR"  - the overnight rate, which DOES honour the asof parameter
+#   code "THORA" - the 1M/3M/6M compounded averages, which DO NOT: they always
+#                  come back with the latest values, whatever date you ask for.
+#
+# So each row's own asof field is used rather than the requested date. Trusting
+# the query date would stamp today's average rates onto every historical date in
+# a backfill - eleven years of fabricated data that would look entirely
+# plausible. The consequence is that O/N backfills fully while the averages only
+# accumulate from the day this starts running.
+# --------------------------------------------------------------------------
+
+THAIBMA_THOR_URL = "https://www.thaibma.or.th/api/thor/daily"
+THAIBMA_AVAIL_URL = "https://www.thaibma.or.th/api/thor/avail"
+
+THOR_HISTORY_START = datetime.date(2015, 1, 5)   # per /api/thor/avail
+
+
+def parse_thor(payload, requested_date):
+    """Returns [(date_iso, tenor, rate)] from the ThaiBMA daily response."""
+    if not isinstance(payload, list):
+        raise FetchError("ThaiBMA THOR response was not a list - format changed")
+
+    rows = []
+    for item in payload:
+        tenor = (item.get("tenor") or "").strip().upper()
+        rate = item.get("rate")
+        asof = item.get("asof") or ""
+        if not tenor or not isinstance(rate, (int, float)):
+            continue
+        # The row's own date, never the requested one. See the note above.
+        date = asof[:10]
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+            raise FetchError(
+                f"ThaiBMA returned an unparsable asof {asof!r} for {tenor} - "
+                f"format changed")
+        rows.append((date, tenor, float(rate)))
+    return rows
+
+
+def fetch_thor_day(trade_date):
+    """One trade date. EMPTY on weekends and Thai public holidays."""
+    def strategy():
+        body, status = _request(
+            f"{THAIBMA_THOR_URL}?asof={trade_date.isoformat()}",
+            headers={"Accept": "application/json"}, timeout=60)
+        if status >= 400:
+            raise FetchError(f"ThaiBMA returned HTTP {status} for {trade_date}")
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            raise FetchError(
+                f"ThaiBMA returned non-JSON for {trade_date} - the endpoint may "
+                f"have moved or now requires a key")
+        return parse_thor(payload, trade_date), False
+
+    out = _try_strategies([("thaibma-daily", strategy)])
+    if out.ok:
+        validate_rows("THOR", out.rows)
+    return out
+
+
+def fetch_thor_range(start, end, pause=0.25, on_progress=None):
+    """Probe each weekday in [start, end], as with BVAL and the BNM benchmarks."""
+    rows, no_pub, failures = [], [], []
+    day = start
+    while day <= end:
+        if day.weekday() < 5:
+            out = fetch_thor_day(day)
+            if out.ok:
+                rows.extend(out.rows)
+            elif out.status == EMPTY:
+                no_pub.append(day.isoformat())
+            else:
+                failures.append(f"{day}: {out.detail}")
+            if on_progress:
+                on_progress(day, len(out.rows), out.status)
+            time.sleep(pause)
+        day += datetime.timedelta(days=1)
+
+    if failures and not rows:
+        return Outcome(FAILED, [], None, f"every requested day failed. First: {failures[0]}")
+    detail = f"{len(no_pub)} weekday(s) with no publication"
+    if failures:
+        detail += f"; {len(failures)} day(s) errored (first: {failures[0]})"
+    if not rows:
+        return Outcome(EMPTY, [], "thaibma-daily", detail)
+    return Outcome(OK, rows, "thaibma-daily", detail)
+
+
+# --------------------------------------------------------------------------
 # USD SOFR - NY Fed public API
 # --------------------------------------------------------------------------
 
@@ -784,12 +878,15 @@ def probe(curve):
         return fetch_klibor(today - datetime.timedelta(days=10), today)
     if curve in BNM_MYOR_URLS:
         return fetch_myor(curve, today - datetime.timedelta(days=10), today)
-    if curve in ("BVAL", "MGS", "MGII"):
+    if curve in ("BVAL", "MGS", "MGII", "THOR"):
         # Walk back to the most recent weekday that published, so a probe run
         # on a Monday morning or a holiday does not look like a failure.
-        fetch = (fetch_bval_day if curve == "BVAL"
-                 else lambda d: fetch_benchmark_day(curve, d))
-        label = "pdex-graphql" if curve == "BVAL" else "bnm-benchmark-yields"
+        if curve == "BVAL":
+            fetch, label = fetch_bval_day, "pdex-graphql"
+        elif curve == "THOR":
+            fetch, label = fetch_thor_day, "thaibma-daily"
+        else:
+            fetch, label = (lambda d: fetch_benchmark_day(curve, d)), "bnm-benchmark-yields"
         day, checked = today, 0
         while checked < 7:
             if day.weekday() < 5:
