@@ -674,6 +674,57 @@ class TestMarketLayout(unittest.TestCase):
         for market, flag, _ in db.curves_by_market():
             self.assertNotIn("\U0001F1E6", flag, f"{market} uses a regional indicator")
 
+    def test_a_market_with_several_benchmarks_spans_two_slots(self):
+        """Malaysia carries five benchmarks against one each for Thailand and
+        the US. Left as equal columns it ran 1,728px against their ~300px, so
+        it takes a wider slot and flows its cards several abreast instead."""
+        spans = {m["market"]: m["span"] for m in db.market_layout()}
+        self.assertEqual(spans["Malaysia"], 2)
+        for market in ("Philippines", "Thailand", "United States"):
+            self.assertEqual(spans[market], 1, market)
+
+    def test_wide_markets_flow_several_cards_across(self):
+        """Both dashboards read `columns` from here, so the hosted app, whose
+        columns cannot reflow on width, matches the local one."""
+        for entry in db.market_layout():
+            expected = db.WIDE_MARKET_COLUMNS if entry["span"] > 1 else 1
+            self.assertEqual(entry["columns"], expected, entry["market"])
+        self.assertGreater(db.WIDE_MARKET_COLUMNS, 1)
+
+    def test_malaysia_splits_into_money_market_then_government(self):
+        malaysia = next(m for m in db.market_layout() if m["market"] == "Malaysia")
+        self.assertEqual([g["group"] for g in malaysia["groups"]],
+                         ["Money market", "Government"])
+        by_group = {g["group"]: g["curves"] for g in malaysia["groups"]}
+        self.assertEqual(sorted(by_group["Money market"]), ["KLIBOR", "MYOR", "MYORI"])
+        self.assertEqual(sorted(by_group["Government"]), ["MGII", "MGS"])
+
+    def test_single_group_markets_carry_no_heading(self):
+        """A heading that contrasts with nothing is clutter, so a market whose
+        benchmarks all sit in one group reports group=None."""
+        for entry in db.market_layout():
+            if entry["market"] == "Malaysia":
+                continue
+            self.assertEqual([g["group"] for g in entry["groups"]], [None],
+                             entry["market"])
+
+    def test_layout_groups_hold_every_curve_exactly_once(self):
+        placed = [c for e in db.market_layout() for g in e["groups"] for c in g["curves"]]
+        self.assertEqual(sorted(placed), sorted(db.CURVES))
+        self.assertEqual(len(placed), len(set(placed)))
+
+    def test_flat_curve_list_agrees_with_the_groups(self):
+        for entry in db.market_layout():
+            grouped = [c for g in entry["groups"] for c in g["curves"]]
+            self.assertEqual(sorted(grouped), sorted(entry["curves"]), entry["market"])
+
+    def test_every_curve_declares_a_known_group(self):
+        for curve, meta in db.CURVES.items():
+            self.assertIn(meta.get("group"), db.GROUP_ORDER, curve)
+
+    def test_layout_keeps_the_market_order(self):
+        self.assertEqual([m["market"] for m in db.market_layout()], db.MARKET_ORDER)
+
     def test_malaysia_star_is_a_polygon_not_a_ring(self):
         """It was drawn as a circle inside a circle, which reads as a ring."""
         flag = db.MARKET_FLAGS["Malaysia"]

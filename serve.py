@@ -233,9 +233,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({
                     "curves": get_meta(conn),
                     # Grouped left-to-right by market, with an inline SVG flag,
-                    # so both dashboards lay out identically.
-                    "markets": [{"market": m, "flag": f, "curves": c}
-                                for m, f, c in db.curves_by_market()],
+                    # a column span and money-market/government sub-groups, so
+                    # both dashboards lay out identically.
+                    "markets": db.market_layout(),
                     "today": datetime.date.today().isoformat(),
                     "refresh": _refresh_state,
                 })

@@ -86,18 +86,55 @@ button:disabled { opacity: 0.5; cursor: default; }
 button.primary { background: var(--series-1); color: #fff; border-color: transparent; font-weight: 550; }
 
 /* ---- market columns ---- */
-/* One column per market, left to right. Malaysia carries five benchmarks
-   against one each side, so its column runs longer. */
-.markets { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-           gap: 20px; margin-bottom: 28px; align-items: start; }
+/* One column per market, left to right. A market carrying several benchmarks
+   (Malaysia has five against one each side) takes two grid slots and flows its
+   cards two-abreast, so the row stays roughly level instead of one column
+   running two screens while the others end after 600px. The span comes from
+   db.market_layout() so the hosted dashboard groups them identically. */
+/* Stacked by default. `dense` matters: the wide market takes a whole row, and
+   without it the narrow markets after it would leave a hole in the row above. */
+.markets { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px;
+           margin-bottom: 28px; align-items: start; grid-auto-flow: row dense; }
 .market { min-width: 0; }
+.market.wide { grid-column: 1 / -1; }
 .mkt-head { display: flex; align-items: center; gap: 9px; margin: 0 0 12px;
             padding-bottom: 9px; border-bottom: 1px solid var(--grid); }
 .mkt-head .flag { display: inline-flex; line-height: 0; border-radius: 3px;
                   overflow: hidden; box-shadow: 0 0 0 1px var(--border); flex: none; }
 .mkt-head .name { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
 .mkt-head .count { font-size: 11px; color: var(--text-muted); margin-left: auto; }
-.market .card + .card { margin-top: 14px; }
+
+/* Money market vs government. Only drawn where a market actually holds both,
+   so a single-benchmark column never carries a redundant heading. */
+.grp + .grp { margin-top: 18px; }
+.grp-head { font-size: 10px; font-weight: 650; text-transform: uppercase;
+            letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 9px; }
+/* Cards fill whatever width the column was given, never going below the ~300px
+   three headline figures need to sit on one line. min() keeps a single-card
+   column from overflowing when the column itself is narrower than that. */
+.grp-cards { display: grid; gap: 14px; align-items: start;
+             grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); }
+/* auto-fill rather than auto-fit: the government group holds two cards where
+   the money market group holds three, and auto-fit would stretch those two
+   to half the row each so the same card read at two different sizes. */
+
+/* Three single-benchmark markets share a row; the wide one gets its own and
+   flows three cards across.
+
+   Keeping all four markets in one row was tried and measured worse. It leaves
+   the wide market only about 630px, so its cards fall to ~305px, the three
+   headline figures wrap onto two lines, and the section grows to 977px against
+   819px for this arrangement. Height is the thing being fixed here, so the row
+   loses. */
+/* Breakpoints follow the card, not round numbers. A card needs ~330px to keep
+   its three headline figures on one line, so three across needs 3*330 + 2*20 of
+   content, and two across needs 2*330 + 20. Below that they stack. */
+@media (min-width: 760px) {
+  .markets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1120px) {
+  .markets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 
 /* ---- curve cards ---- */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 28px; }
@@ -117,6 +154,20 @@ button.primary { background: var(--series-1); color: #fff; border-color: transpa
 .hero .lbl { font-size: 11px; color: var(--text-secondary); font-weight: 600; }
 .hero .chg { font-size: 11px; font-variant-numeric: tabular-nums; }
 .heroes .asof { width: 100%; margin: 2px 0 0; font-size: 12px; color: var(--text-muted); }
+
+/* The full tenor table repeats the headline figures for most curves now that
+   each card shows three, so it collapses by default and the card keeps only
+   what the headlines do not already say. */
+.more { margin: 0 0 8px; }
+.more > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center;
+                  gap: 5px; font-size: 11px; color: var(--text-secondary);
+                  border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; }
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::after { content: "be"; font-size: 9px; transition: transform .12s; }
+.more[open] > summary::after { transform: rotate(180deg); }
+.more > summary:hover { color: var(--text-primary); border-color: var(--axis); }
+.more .extra { font-variant-numeric: tabular-nums; }
+.more table { margin-top: 8px; }
 
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th, td { text-align: right; padding: 5px 0; font-size: 13px; }
@@ -314,27 +365,49 @@ function renderCards() {
   const byCurve = {};
   state.meta.forEach((m, i) => { byCurve[m.curve] = m; m._slot = i; });
 
-  const groups = (state.markets && state.markets.length)
+  const all = state.meta.map(m => m.curve);
+  const markets = (state.markets && state.markets.length)
     ? state.markets
-    : [{ market: "", flag: "", curves: state.meta.map(m => m.curve) }];
+    : [{ market: "", flag: "", curves: all, span: 1, columns: 1,
+         groups: [{ group: null, curves: all }] }];
 
   const pending = [];
-  groups.forEach(group => {
+  markets.forEach(mkt => {
     const col = document.createElement("div");
-    col.className = "market";
-    if (group.market) {
+    // A market with several benchmarks spans two grid slots and flows its
+    // cards two-abreast, so no single column runs away with the page height.
+    col.className = "market" + ((mkt.span || 1) > 1 ? " wide" : "");
+    if (mkt.market) {
       col.innerHTML =
-        `<div class="mkt-head"><span class="flag">${group.flag}</span>
-           <span class="name">${group.market}</span>
-           <span class="count">${group.curves.length} benchmark${
-             group.curves.length === 1 ? "" : "s"}</span></div>`;
+        `<div class="mkt-head"><span class="flag">${mkt.flag}</span>
+           <span class="name">${mkt.market}</span>
+           <span class="count">${mkt.curves.length} benchmark${
+             mkt.curves.length === 1 ? "" : "s"}</span></div>`;
     }
     host.appendChild(col);
-    group.curves.forEach(curve => {
-      const m = byCurve[curve];
-      if (!m) return;
-      col.appendChild(buildCard(m, m._slot));
-      pending.push(m);
+
+    const groups = mkt.groups && mkt.groups.length
+      ? mkt.groups : [{ group: null, curves: mkt.curves }];
+    groups.forEach(g => {
+      const block = document.createElement("div");
+      block.className = "grp";
+      // group is null where the market sits entirely in one group, and a
+      // heading with nothing to contrast against would only add clutter.
+      if (g.group) block.innerHTML = `<p class="grp-head">${g.group}</p>`;
+      // How many cards fit across is left to the CSS, which auto-fills on the
+      // column's actual width. mkt.columns is what the hosted dashboard uses,
+      // where columns cannot reflow.
+      const grid = document.createElement("div");
+      grid.className = "grp-cards";
+      block.appendChild(grid);
+      col.appendChild(block);
+
+      g.curves.forEach(curve => {
+        const m = byCurve[curve];
+        if (!m) return;
+        grid.appendChild(buildCard(m, m._slot));
+        pending.push(m);
+      });
     });
   });
 
@@ -380,6 +453,13 @@ async function loadCardTable(m) {
             </div>`;
   }).join("") + `<p class="asof">${niceDate(d.date)}</p>`;
 
+  // The headline figures now cover three tenors, so for several curves the
+  // table below repeated them exactly and bought nothing but height. Show it
+  // only where the source publishes tenors the headlines leave out, and keep
+  // it collapsed until asked for.
+  const extras = d.rows.filter(r => !heads.some(h => h.tenor === r.tenor));
+  if (!extras.length) { $("tbl-" + m.curve).innerHTML = ""; return; }
+
   const body = d.rows.map(r => {
     const c = r.change_bp;
     const cls = c === null ? "chg-flat" : c > 0 ? "chg-rise" : c < 0 ? "chg-fall" : "chg-flat";
@@ -388,8 +468,11 @@ async function loadCardTable(m) {
             <td class="${cls}">${txt}</td></tr>`;
   }).join("");
   $("tbl-" + m.curve).innerHTML =
-    `<table><thead><tr><th>Tenor</th><th>Rate&nbsp;%</th><th>Chg&nbsp;bp</th></tr></thead>
-     <tbody>${body}</tbody></table>`;
+    `<details class="more">
+       <summary>All ${d.rows.length} tenors</summary>
+       <table><thead><tr><th>Tenor</th><th>Rate&nbsp;%</th><th>Chg&nbsp;bp</th></tr></thead>
+       <tbody>${body}</tbody></table>
+     </details>`;
 }
 
 /* ---------------- controls ---------------- */

@@ -243,60 +243,104 @@ st.markdown("""
                   overflow:hidden; box-shadow:0 0 0 1px rgba(128,128,128,.35); }
 .mkt-head .name { font-size:15px; font-weight:650; letter-spacing:-0.01em; }
 .mkt-head .count { font-size:12px; opacity:.6; margin-left:auto; }
+/* Money market vs government, matching the local dashboard. */
+.grp-head { font-size:10px; font-weight:650; text-transform:uppercase;
+            letter-spacing:.07em; opacity:.55; margin:14px 0 2px; }
 </style>
 """, unsafe_allow_html=True)
 
 meta_by_curve = {m["curve"]: m for m in meta}
-groups = db.curves_by_market()
+layout = db.market_layout()
 
-# One column per market, left to right: Philippines, Malaysia, United States.
-# Malaysia carries five curves against one each side, so its column runs longer.
-for col, (market, flag, curve_names) in zip(st.columns(len(groups)), groups):
-    with col:
-        st.markdown(
-            f'<div class="mkt-head"><span class="flag">{flag}</span>'
-            f'<span class="name">{market}</span>'
-            f'<span class="count">{len(curve_names)} benchmark'
-            f'{"s" if len(curve_names) != 1 else ""}</span></div>',
-            unsafe_allow_html=True)
 
-        for curve in curve_names:
-            m = meta_by_curve[curve]
-            if not m["rows"]:
-                st.metric(m["label"], "no data")
-                continue
-            latest = load_latest(FP, curve)
-            rows = latest["rows"]
-            by_tenor = {r["tenor"]: r for r in rows}
-            # Which tenors headline the card is declared per curve in db.CURVES
-            # and resolved by get_latest, so both dashboards agree. Usually one,
-            # but PHP BVAL shows 3Y, 5Y and 7Y side by side.
-            heads = [by_tenor[t] for t in latest["headlines"] if t in by_tenor] or [rows[0]]
+def render_card(curve):
+    """One benchmark: its headline figures, then the rest of the curve folded
+    away. The headlines now cover three tenors, so for KLIBOR, THOR and SOFR the
+    full table repeated them exactly; it is only drawn where the source
+    publishes tenors the headlines leave out."""
+    m = meta_by_curve[curve]
+    if not m["rows"]:
+        st.metric(m["label"], "no data")
+        return
+    latest = load_latest(FP, curve)
+    rows = latest["rows"]
+    by_tenor = {r["tenor"]: r for r in rows}
+    # Which tenors headline the card is declared per curve in db.CURVES and
+    # resolved by get_latest, so both dashboards agree.
+    heads = [by_tenor[t] for t in latest["headlines"] if t in by_tenor] or [rows[0]]
 
-            st.markdown(f"**{m['label']}**")
-            for head, hcol in zip(heads, st.columns(len(heads))):
-                change = head["change_bp"]
-                with hcol:
-                    st.metric(
-                        label=head["tenor"],
-                        value=f"{head['rate']:.3f}%",
-                        delta=None if change is None else f"{change:+.1f} bp",
-                        # A rising benchmark raises borrowing cost, so a rise
-                        # reads red. An unchanged rate stays neutral rather
-                        # than showing as a red rise.
-                        delta_color="off" if not change else "inverse")
-            st.caption(f"{nice_date(latest['date'])} · {m['source']}")
+    st.markdown(f"**{m['label']}**")
+    for head, hcol in zip(heads, st.columns(len(heads))):
+        change = head["change_bp"]
+        with hcol:
+            st.metric(
+                label=head["tenor"],
+                value=f"{head['rate']:.3f}%",
+                delta=None if change is None else f"{change:+.1f} bp",
+                # A rising benchmark raises borrowing cost, so a rise reads red.
+                # An unchanged rate stays neutral rather than showing as a rise.
+                delta_color="off" if not change else "inverse")
+    st.caption(f"{nice_date(latest['date'])} · {m['source']}")
 
-            frame = pd.DataFrame([{
-                "Tenor": r["tenor"],
-                "Rate %": r["rate"],
-                "Chg bp": r["change_bp"],
-            } for r in rows])
-            st.dataframe(frame, hide_index=True, use_container_width=True,
-                         column_config={
-                             "Rate %": st.column_config.NumberColumn(format="%.3f"),
-                             "Chg bp": st.column_config.NumberColumn(format="%+.1f"),
-                         })
+    head_tenors = {h["tenor"] for h in heads}
+    if not any(r["tenor"] not in head_tenors for r in rows):
+        return
+    with st.expander(f"All {len(rows)} tenors"):
+        frame = pd.DataFrame([{
+            "Tenor": r["tenor"],
+            "Rate %": r["rate"],
+            "Chg bp": r["change_bp"],
+        } for r in rows])
+        st.dataframe(frame, hide_index=True, use_container_width=True,
+                     column_config={
+                         "Rate %": st.column_config.NumberColumn(format="%.3f"),
+                         "Chg bp": st.column_config.NumberColumn(format="%+.1f"),
+                     })
+
+
+def render_market(mkt, across=1):
+    """A market column: heading, then its cards, optionally several abreast."""
+    st.markdown(
+        f'<div class="mkt-head"><span class="flag">{mkt["flag"]}</span>'
+        f'<span class="name">{mkt["market"]}</span>'
+        f'<span class="count">{len(mkt["curves"])} benchmark'
+        f'{"s" if len(mkt["curves"]) != 1 else ""}</span></div>',
+        unsafe_allow_html=True)
+
+    for group in mkt["groups"]:
+        # group is None where the market sits entirely in one group; a heading
+        # that contrasts with nothing would only add clutter.
+        if group["group"]:
+            st.markdown(f'<p class="grp-head">{group["group"]}</p>',
+                        unsafe_allow_html=True)
+        curves = group["curves"]
+        if across <= 1:
+            for curve in curves:
+                render_card(curve)
+            continue
+        # Fixed column count rather than one per card, so a group of two does
+        # not render at twice the width of a group of three.
+        for start in range(0, len(curves), across):
+            for curve, ccol in zip(curves[start:start + across], st.columns(across)):
+                with ccol:
+                    render_card(curve)
+
+
+# Markets carrying a single benchmark share one row; a market carrying several
+# (Malaysia has five) takes a full-width row of its own and flows its cards
+# three abreast. Splitting them this way keeps every card wide enough for three
+# headline figures, which a four-column row does not.
+narrow = [mkt for mkt in layout if mkt["span"] == 1]
+wide = [mkt for mkt in layout if mkt["span"] > 1]
+
+if narrow:
+    for col, mkt in zip(st.columns(len(narrow)), narrow):
+        with col:
+            render_market(mkt)
+
+for mkt in wide:
+    st.markdown("")
+    render_market(mkt, across=min(mkt["columns"], len(mkt["curves"])))
 
 st.divider()
 

@@ -20,8 +20,13 @@ DATA_DIR = os.path.join(HERE, "data")
 
 # Curve registry. Adding a new benchmark (e.g. MYOR) means adding a line here
 # plus a fetcher in sources.py - no schema migration needed.
+#
+# "group" splits a market's benchmarks into money market and government
+# curves. It is only used for layout: a market carrying several of each
+# gets sub-headings so the cards do not read as one undifferentiated run.
 CURVES = {
     "BVAL": {
+        "group": "Government",
         "currency": "PHP",
         "market": "Philippines",
         "label": "PHP BVAL",
@@ -31,6 +36,7 @@ CURVES = {
         "headline_tenors": ["3Y", "5Y", "7Y"],   # the tenors quoted most often here
     },
     "KLIBOR": {
+        "group": "Money market",
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR KLIBOR",
@@ -43,6 +49,7 @@ CURVES = {
         "headline_tenors": ["1M", "3M", "6M"],
     },
     "MYOR": {
+        "group": "Money market",
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MYOR",
@@ -55,6 +62,7 @@ CURVES = {
         "headline_tenors": ["1M", "3M", "6M"],
     },
     "MYORI": {
+        "group": "Money market",
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MYOR-i (Islamic)",
@@ -65,6 +73,7 @@ CURVES = {
         "headline_tenors": ["1M", "3M", "6M"],
     },
     "MGS": {
+        "group": "Government",
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGS",
@@ -75,6 +84,7 @@ CURVES = {
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
     },
     "MGII": {
+        "group": "Government",
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGII (Islamic)",
@@ -86,6 +96,7 @@ CURVES = {
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
     },
     "THOR": {
+        "group": "Money market",
         "currency": "THB",
         "market": "Thailand",
         "label": "THB THOR",
@@ -98,6 +109,7 @@ CURVES = {
         "url": "https://app.bot.or.th/thor/en",
     },
     "SOFR": {
+        "group": "Money market",
         "currency": "USD",
         "market": "United States",
         "label": "USD SOFR",
@@ -188,6 +200,59 @@ def curves_by_market():
             else:
                 grouped.append((meta["market"], MARKET_FLAGS.get(meta["market"], ""), [curve]))
     return grouped
+
+
+# Order the group sub-headings appear in within a market column.
+GROUP_ORDER = ["Money market", "Government"]
+
+# A market carrying this many benchmarks or more gets a double-width column so
+# its cards flow two-abreast instead of running down the page. Malaysia has
+# five against one each for Thailand and the US, which otherwise left the row
+# roughly 1,100px taller than it needed to be, nearly all of it whitespace.
+WIDE_MARKET_CURVES = 4
+
+# How many cards a wide market flows across. Three fits the ~330px a card needs
+# for its headline figures inside the usual 1140px content width.
+WIDE_MARKET_COLUMNS = 3
+
+
+def market_layout():
+    """Market columns ready to render, in display order.
+
+    Each entry is {market, flag, curves, span, columns, groups}. `span` is how
+    many grid slots the column takes and `columns` how many card columns flow
+    inside it. `groups` is [{group, curves}, ...]; a market whose benchmarks all
+    sit in one group gets a single entry with group=None, because a heading that
+    contrasts with nothing is just noise.
+
+    Both dashboards read this, so the local and hosted layouts cannot drift.
+    """
+    layout = []
+    for market, flag, curves in curves_by_market():
+        groups = []
+        for name in GROUP_ORDER:
+            members = [c for c in curves if CURVES[c].get("group") == name]
+            if members:
+                groups.append({"group": name, "curves": members})
+        # Anything with no group, or a market sitting entirely in one group.
+        ungrouped = [c for c in curves if CURVES[c].get("group") not in GROUP_ORDER]
+        if ungrouped:
+            groups.append({"group": None, "curves": ungrouped})
+        if len(groups) < 2:
+            groups = [{"group": None, "curves": curves}]
+
+        wide = len(curves) >= WIDE_MARKET_CURVES
+        layout.append({
+            "market": market,
+            "flag": flag,
+            # Flat list kept alongside the groups: callers that only need the
+            # curve names should not have to flatten.
+            "curves": curves,
+            "span": 2 if wide else 1,
+            "columns": WIDE_MARKET_COLUMNS if wide else 1,
+            "groups": groups,
+        })
+    return layout
 
 
 # Sort weight for tenors, expressed in months. Used for ordering term structures.
