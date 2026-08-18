@@ -12,6 +12,7 @@ Stdlib unittest only. Does not touch the network or the real database.
 """
 
 import datetime
+import json
 import os
 import re
 import sqlite3
@@ -441,6 +442,118 @@ class TestBotThorParsing(unittest.TestCase):
             sources.parse_bot_thor("<table><tr><td>1</td><td>THOR</td></tr></table>")
 
 
+class TestSofrAveragesParsing(unittest.TestCase):
+    """The compounded averages come from the NY Fed's separate SOFRAI series."""
+
+    PAYLOAD = json.dumps({"refRates": [
+        {"effectiveDate": "2026-08-17", "type": "SOFRAI", "average30day": 3.63649,
+         "average90day": 3.63370, "average180day": 3.66107, "index": 1.25515131,
+         "revisionIndicator": ""},
+        {"effectiveDate": "2026-08-14", "type": "SOFRAI", "average30day": 3.63617,
+         "average90day": 3.63113, "average180day": 3.66204, "index": 1.25477279,
+         "revisionIndicator": ""},
+    ]})
+
+    def test_all_three_averages_are_read(self):
+        rows = sources._sofrai_parse(self.PAYLOAD, 200, "test")
+        got = {(d, t): r for d, t, r in rows}
+        self.assertEqual(got[("2026-08-17", "30D")], 3.63649)
+        self.assertEqual(got[("2026-08-17", "90D")], 3.63370)
+        self.assertEqual(got[("2026-08-17", "180D")], 3.66107)
+        self.assertEqual(len(rows), 6)
+
+    def test_the_index_is_not_stored_as_a_rate(self):
+        """index is a cumulative level near 1.25, not a percentage. Stored beside
+        rates it would wreck every chart and breach the 0-30 validation band."""
+        rows = sources._sofrai_parse(self.PAYLOAD, 200, "test")
+        self.assertNotIn(1.25515131, [r for _, _, r in rows])
+        self.assertEqual({t for _, t, _ in rows}, {"30D", "90D", "180D"})
+
+    def test_renamed_fields_raise_rather_than_read_as_empty(self):
+        """A payload with no recognised keys must not look like a quiet day:
+        empty means 'nothing published', which is a normal weekend."""
+        payload = json.dumps({"refRates": [
+            {"effectiveDate": "2026-08-17", "type": "SOFRAI", "avg30d": 3.6}]})
+        with self.assertRaises(sources.FetchError):
+            sources._sofrai_parse(payload, 200, "test")
+
+    def test_an_empty_series_is_still_empty_not_an_error(self):
+        self.assertEqual(sources._sofrai_parse('{"refRates": []}', 200, "test"), [])
+
+    def test_other_series_in_the_payload_are_ignored(self):
+        payload = json.dumps({"refRates": [
+            {"effectiveDate": "2026-08-17", "type": "SOFR", "percentRate": 3.62}]})
+        self.assertEqual(sources._sofrai_parse(payload, 200, "test"), [])
+
+    def test_fields_map_by_name_not_position(self):
+        """Guards against a reordered payload shifting 90-day data into 30D."""
+        self.assertEqual(sources.SOFRAI_FIELDS,
+                         {"average30day": "30D", "average90day": "90D",
+                          "average180day": "180D"})
+
+    def test_averages_sort_inside_the_monthly_tenors(self):
+        """30/90/180 calendar days are a little short of 1/3/6 months, and a tie
+        would make the column order arbitrary."""
+        self.assertEqual(
+            sorted(["180D", "O/N", "90D", "30D"], key=db.tenor_sort_key),
+            ["O/N", "30D", "90D", "180D"])
+        for days, month in (("30D", "1M"), ("90D", "3M"), ("180D", "6M")):
+            self.assertLess(db.tenor_sort_key(days), db.tenor_sort_key(month))
+
+    def test_sofr_now_declares_all_four_tenors(self):
+        self.assertEqual(sources.CURVE_TENORS["SOFR"], {"O/N", "30D", "90D", "180D"})
+
+
+class TestSofrOutcomeMerge(unittest.TestCase):
+    """The overnight rate and the averages are separate NY Fed endpoints, so one
+    changing shape must not cost us the other."""
+
+    ON = [("2026-08-14", "O/N", 3.62)]
+    AVG = [("2026-08-17", "30D", 3.63649)]
+
+    def test_both_succeeding_returns_every_row(self):
+        out = sources._merge_sofr(
+            sources.Outcome(sources.OK, self.ON, "nyfed-search"),
+            sources.Outcome(sources.OK, self.AVG, "nyfed-sofrai-search"))
+        self.assertTrue(out.ok)
+        self.assertEqual(len(out.rows), 2)
+
+    def test_averages_failing_still_delivers_the_overnight_rate(self):
+        out = sources._merge_sofr(
+            sources.Outcome(sources.OK, self.ON, "nyfed-search"),
+            sources.Outcome(sources.FAILED, [], None, "endpoint moved"))
+        self.assertTrue(out.ok)
+        self.assertEqual(out.rows, self.ON)
+        self.assertIn("endpoint moved", out.detail)
+
+    def test_overnight_failing_still_delivers_the_averages(self):
+        out = sources._merge_sofr(
+            sources.Outcome(sources.FAILED, [], None, "boom"),
+            sources.Outcome(sources.OK, self.AVG, "nyfed-sofrai-search"))
+        self.assertTrue(out.ok)
+        self.assertEqual(out.rows, self.AVG)
+
+    def test_both_failing_is_a_failure(self):
+        out = sources._merge_sofr(
+            sources.Outcome(sources.FAILED, [], None, "a"),
+            sources.Outcome(sources.FAILED, [], None, "b"))
+        self.assertTrue(out.failed)
+
+    def test_both_quiet_is_empty_not_a_failure(self):
+        """A US public holiday publishes neither series. That is not a fault."""
+        out = sources._merge_sofr(
+            sources.Outcome(sources.EMPTY, [], None, "no data published"),
+            sources.Outcome(sources.EMPTY, [], None, "no data published"))
+        self.assertEqual(out.status, sources.EMPTY)
+        self.assertFalse(out.failed)
+
+    def test_degradation_carries_through(self):
+        out = sources._merge_sofr(
+            sources.Outcome(sources.OK, self.ON, "nyfed-latest", degraded=True),
+            sources.Outcome(sources.OK, self.AVG, "nyfed-sofrai-search"))
+        self.assertTrue(out.degraded)
+
+
 class TestValidation(unittest.TestCase):
 
     def test_accepts_good_data(self):
@@ -772,11 +885,18 @@ class TestHeadlineTenors(unittest.TestCase):
                 db.headline_tenors(curve, ["O/N", "1M", "3M", "6M"]),
                 ["1M", "3M", "6M"], curve)
 
-    def test_sofr_stays_single_because_it_publishes_one_tenor(self):
-        """SOFR is overnight only. There is no second or third figure to show,
-        so the card is a single hero by necessity, not by preference."""
+    def test_sofr_headlines_its_compounded_averages(self):
+        """It headlined O/N alone only because that was the single tenor the NY
+        Fed endpoint carried. With the averages added it follows MYOR and THOR:
+        term rates as the figures, the overnight rate in the table below."""
+        self.assertEqual(
+            db.headline_tenors("SOFR", ["O/N", "30D", "90D", "180D"]),
+            ["30D", "90D", "180D"])
+
+    def test_sofr_falls_back_to_overnight_before_the_averages_existed(self):
+        """SOFR Averages start Mar 2020. On any earlier date only O/N published,
+        and the card must still show something rather than going blank."""
         self.assertEqual(db.headline_tenors("SOFR", ["O/N"]), ["O/N"])
-        self.assertEqual(set(sources.CURVE_TENORS["SOFR"]), {"O/N"})
 
     def test_results_are_in_tenor_order(self):
         out = db.headline_tenors("BVAL", ["7Y", "3Y", "5Y"])

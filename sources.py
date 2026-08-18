@@ -62,7 +62,7 @@ CURVE_TENORS = {
     "MGS": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
     "MGII": {"3Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"},
     "THOR": {"O/N", "1M", "3M", "6M"},
-    "SOFR": {"O/N"},
+    "SOFR": {"O/N", "30D", "90D", "180D"},
 }
 RATE_MIN, RATE_MAX = 0.0, 30.0
 EARLIEST_SANE_DATE = datetime.date(2000, 1, 1)
@@ -832,6 +832,107 @@ def _sofr_parse(body, status, what):
     return rows
 
 
+# The NY Fed publishes the compounded averages as a separate series, SOFRAI,
+# on its own endpoint. Mapped by the JSON key rather than by position so a
+# reordered payload cannot silently shift 90-day data into the 30-day column.
+SOFRAI_FIELDS = {"average30day": "30D", "average90day": "90D", "average180day": "180D"}
+
+# First publication of SOFR Averages. Ask for less and the backfill silently
+# stops short; ask for more and the API just returns nothing before this.
+SOFRAI_HISTORY_START = datetime.date(2020, 3, 2)
+
+
+def _sofrai_parse(body, status, what):
+    """Rows for the compounded averages. The index value is deliberately
+    dropped: it is a cumulative index around 1.25, not a percentage rate, so
+    storing it beside rates would corrupt every chart and breach the 0-30
+    validation band."""
+    if status >= 400:
+        raise FetchError(f"NY Fed returned HTTP {status} for {what}")
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        raise FetchError(f"NY Fed returned non-JSON for {what} - endpoint may have moved")
+    if "refRates" not in payload:
+        raise FetchError(f"NY Fed response for {what} has no 'refRates' key - format changed")
+
+    rows, seen_fields, sofrai_items = [], set(), 0
+    for item in payload["refRates"]:
+        if (item.get("type") or "").upper() != "SOFRAI":
+            continue
+        sofrai_items += 1
+        date_str = item.get("effectiveDate")
+        if not date_str:
+            continue
+        for field, tenor in SOFRAI_FIELDS.items():
+            value = item.get(field)
+            if isinstance(value, (int, float)):
+                rows.append((date_str, tenor, float(value)))
+                seen_fields.add(field)
+    # SOFRAI rows that carry none of the expected keys mean the field names
+    # changed. Returning zero rows would read as "nothing published today",
+    # which is a normal weekend, so it has to raise instead. Gated on having
+    # seen SOFRAI entries at all: some endpoints return every series mixed
+    # together, and a payload of purely other types is genuinely nothing here.
+    if sofrai_items and not seen_fields:
+        raise FetchError(
+            f"NY Fed {what} carried no average30day/90day/180day fields - "
+            "the SOFRAI payload changed shape")
+    return rows
+
+
+def fetch_sofr_averages(start=None, end=None):
+    """30, 90 and 180 day compounded SOFR averages."""
+    start = start or SOFRAI_HISTORY_START
+    end = end or datetime.date.today()
+    span = max(1, (end - start).days)
+
+    def _search():
+        url = (f"{NYFED_BASE}/secured/sofrai/search.json"
+               f"?startDate={start.isoformat()}&endDate={end.isoformat()}")
+        return _sofrai_parse(*_request(url, timeout=120), what="sofrai search.json"), False
+
+    def _last_n():
+        n = min(max(span, 5), 1000)
+        url = f"{NYFED_BASE}/secured/sofrai/last/{n}.json"
+        rows = _sofrai_parse(*_request(url, timeout=120), what=f"sofrai last/{n}.json")
+        lo, hi = start.isoformat(), end.isoformat()
+        return [r for r in rows if lo <= r[0] <= hi], False
+
+    out = _try_strategies([
+        ("nyfed-sofrai-search", _search),
+        ("nyfed-sofrai-last-n", _last_n),
+    ])
+    if out.ok:
+        validate_rows("SOFR", out.rows)
+    return out
+
+
+def _merge_sofr(overnight, averages):
+    """Combine the two NY Fed series into one Outcome.
+
+    Kept independent on purpose: they are separate endpoints with separate
+    payload shapes, so a change to one must not cost us the other. Either side
+    succeeding is a success, and what the other side did is recorded in detail
+    rather than thrown away.
+    """
+    parts = [("overnight", overnight), ("averages", averages)]
+    rows = [r for _, out in parts for r in out.rows]
+    notes = [f"{name} {out.status}" + (f" ({out.detail})" if out.detail else "")
+             for name, out in parts]
+    detail = "; ".join(notes)
+
+    if rows:
+        # "recovered after" is the prefix cli.py keys its fallback note on, so
+        # only use it when a strategy inside one of the two actually fell back.
+        lead = next((out for _, out in parts if out.ok), overnight)
+        return Outcome(OK, rows, lead.strategy, detail,
+                       degraded=any(out.degraded for _, out in parts))
+    if any(out.failed for _, out in parts):
+        return Outcome(FAILED, [], None, detail)
+    return Outcome(EMPTY, [], None, detail)
+
+
 def fetch_sofr(start=None, end=None):
     start = start or datetime.date(2018, 4, 1)
     end = end or datetime.date.today()
@@ -863,7 +964,12 @@ def fetch_sofr(start=None, end=None):
     ])
     if out.ok:
         validate_rows("SOFR", out.rows)
-    return out
+    # The averages only exist from Mar 2020, so a window entirely before that
+    # would only ever return empty and is not worth a request.
+    if end < SOFRAI_HISTORY_START:
+        return out
+    averages = fetch_sofr_averages(max(start, SOFRAI_HISTORY_START), end)
+    return _merge_sofr(out, averages)
 
 
 # --------------------------------------------------------------------------

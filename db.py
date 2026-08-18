@@ -113,10 +113,13 @@ CURVES = {
         "currency": "USD",
         "market": "United States",
         "label": "USD SOFR",
-        "description": "Secured Overnight Financing Rate (overnight, published rate)",
+        "description": ("Secured Overnight Financing Rate, with the NY Fed's "
+                        "compounded 30, 90 and 180 day averages"),
         "source": "Federal Reserve Bank of New York",
-        "url": "https://markets.newyorkfed.org/api/rates/secured/sofr/last/1.json",
-        "headline_tenors": ["O/N"],
+        "url": "https://www.newyorkfed.org/markets/reference-rates/sofr-averages-and-index",
+        # The averages, matching how MYOR and THOR are headlined. Overnight SOFR
+        # is the underlying rate and sits in the table below.
+        "headline_tenors": ["30D", "90D", "180D"],
     },
 }
 
@@ -258,6 +261,10 @@ def market_layout():
 # Sort weight for tenors, expressed in months. Used for ordering term structures.
 TENOR_MONTHS = {
     "O/N": 1.0 / 30, "1W": 0.25, "2W": 0.5,
+    # SOFR Averages are compounded over 30, 90 and 180 calendar days, which is
+    # slightly short of 1, 3 and 6 months. Weighted in days/30.4375 so they sort
+    # just inside the monthly tenors instead of tying with them.
+    "30D": 30 / 30.4375, "90D": 90 / 30.4375, "180D": 180 / 30.4375,
     "1M": 1, "2M": 2, "3M": 3, "6M": 6, "9M": 9, "12M": 12,
     "1Y": 12, "2Y": 24, "3Y": 36, "4Y": 48, "5Y": 60,
     "7Y": 84, "10Y": 120, "20Y": 240, "25Y": 300,
