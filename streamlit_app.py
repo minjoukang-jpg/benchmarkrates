@@ -244,6 +244,12 @@ def nice_date(iso):
     return datetime.date.fromisoformat(iso).strftime("%d %b %Y").lstrip("0")
 
 
+def short_date(iso):
+    """Day and month only, for dates that sit beside a figure where the year
+    would crowd the cell without telling the reader anything."""
+    return datetime.date.fromisoformat(iso).strftime("%d %b").lstrip("0")
+
+
 # --------------------------------------------------------------------------
 # Page
 # --------------------------------------------------------------------------
@@ -321,16 +327,28 @@ def render_card(curve):
     heads = [by_tenor[t] for t in latest["headlines"] if t in by_tenor] or [rows[0]]
 
     st.markdown(f"**{m['label']}**")
-    for head, hcol in zip(heads, st.columns(len(heads))):
-        change = head["change_bp"]
-        with hcol:
-            st.metric(
-                label=head["tenor"],
-                value=f"{head['rate']:.3f}%",
-                delta=None if change is None else f"{change:+.1f} bp",
-                # A rising benchmark raises borrowing cost, so a rise reads red.
-                # An unchanged rate stays neutral rather than showing as a rise.
-                delta_color="off" if not change else "inverse")
+    # Four figures do not fit across one card, so they go two by two. Streamlit
+    # columns cannot reflow on width the way the local dashboard's CSS does,
+    # which is why this is an explicit row size rather than a wrap.
+    per_row = 2 if len(heads) == 4 else len(heads)
+    for start in range(0, len(heads), per_row):
+        batch = heads[start:start + per_row]
+        for head, hcol in zip(batch, st.columns(per_row)):
+            change = head["change_bp"]
+            with hcol:
+                st.metric(
+                    # as_of is set only where the source had not yet published
+                    # this tenor for the card's date, so the figure is the last
+                    # one it did publish. Naming that date is the point: an
+                    # unlabelled stale rate is worse than no rate on a card
+                    # people price off.
+                    label=(f"{head['tenor']} · {short_date(head['as_of'])}"
+                           if head.get("as_of") else head["tenor"]),
+                    value=f"{head['rate']:.3f}%",
+                    delta=None if change is None else f"{change:+.1f} bp",
+                    # A rising benchmark raises borrowing cost, so a rise reads
+                    # red. An unchanged rate stays neutral rather than red.
+                    delta_color="off" if not change else "inverse")
     st.caption(f"{nice_date(latest['date'])} · {m['source']}")
 
     head_tenors = {h["tenor"] for h in heads}
@@ -338,7 +356,8 @@ def render_card(curve):
         return
     with st.expander(f"All {len(rows)} tenors"):
         frame = pd.DataFrame([{
-            "Tenor": r["tenor"],
+            "Tenor": (f"{r['tenor']} ({short_date(r['as_of'])})"
+                      if r.get("as_of") else r["tenor"]),
             "Rate %": r["rate"],
             "Chg bp": r["change_bp"],
         } for r in rows])

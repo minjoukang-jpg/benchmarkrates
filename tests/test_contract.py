@@ -885,13 +885,12 @@ class TestHeadlineTenors(unittest.TestCase):
                 db.headline_tenors(curve, ["O/N", "1M", "3M", "6M"]),
                 ["1M", "3M", "6M"], curve)
 
-    def test_sofr_headlines_its_compounded_averages(self):
-        """It headlined O/N alone only because that was the single tenor the NY
-        Fed endpoint carried. With the averages added it follows MYOR and THOR:
-        term rates as the figures, the overnight rate in the table below."""
+    def test_sofr_headlines_the_overnight_rate_and_all_three_averages(self):
+        """Unlike MYOR and THOR, SOFR keeps its overnight rate on the face of
+        the card: it is what USD facilities fix against day to day."""
         self.assertEqual(
             db.headline_tenors("SOFR", ["O/N", "30D", "90D", "180D"]),
-            ["30D", "90D", "180D"])
+            ["O/N", "30D", "90D", "180D"])
 
     def test_sofr_falls_back_to_overnight_before_the_averages_existed(self):
         """SOFR Averages start Mar 2020. On any earlier date only O/N published,
@@ -925,6 +924,83 @@ class TestHeadlineTenors(unittest.TestCase):
 
     def test_empty_returns_empty(self):
         self.assertEqual(db.headline_tenors("BVAL", []), [])
+
+
+class TestCarryForwardOfHeadlineTenors(unittest.TestCase):
+    """Sources do not always publish every tenor of a curve on the same day.
+    The NY Fed routinely has the SOFR averages out for a date before overnight
+    SOFR itself."""
+
+    def _conn(self):
+        conn = memory_db()
+        db.upsert_rates(conn, "SOFR", [
+            ("2026-08-13", "O/N", 3.61), ("2026-08-13", "30D", 3.6350),
+            ("2026-08-13", "90D", 3.6300), ("2026-08-13", "180D", 3.6600),
+            ("2026-08-14", "O/N", 3.62), ("2026-08-14", "30D", 3.63617),
+            ("2026-08-14", "90D", 3.63113), ("2026-08-14", "180D", 3.66204),
+            # 17 Aug: averages published, overnight rate not yet.
+            ("2026-08-17", "30D", 3.63649), ("2026-08-17", "90D", 3.63370),
+            ("2026-08-17", "180D", 3.66107),
+        ])
+        return conn
+
+    def test_the_missing_tenor_still_appears(self):
+        d = serve.get_latest(self._conn(), "SOFR")
+        self.assertEqual(d["date"], "2026-08-17")
+        self.assertIn("O/N", [r["tenor"] for r in d["rows"]])
+        self.assertIn("O/N", d["headlines"])
+
+    def test_it_is_stamped_with_its_own_date(self):
+        """The whole safeguard: an unlabelled stale rate on a card people price
+        off is worse than no rate at all."""
+        d = serve.get_latest(self._conn(), "SOFR")
+        held = next(r for r in d["rows"] if r["tenor"] == "O/N")
+        self.assertEqual(held["as_of"], "2026-08-14")
+        self.assertEqual(held["rate"], 3.62)
+
+    def test_values_on_the_cards_own_date_are_not_stamped(self):
+        d = serve.get_latest(self._conn(), "SOFR")
+        for row in d["rows"]:
+            if row["tenor"] != "O/N":
+                self.assertIsNone(row["as_of"], row["tenor"])
+
+    def test_the_carried_change_is_against_its_own_prior_date(self):
+        """Not against the card's date, which would compare across a gap and
+        report a movement that never happened."""
+        d = serve.get_latest(self._conn(), "SOFR")
+        held = next(r for r in d["rows"] if r["tenor"] == "O/N")
+        self.assertEqual(held["prev_date"], "2026-08-13")
+        self.assertAlmostEqual(held["change_bp"], 1.0, places=6)
+
+    def test_nothing_is_carried_when_every_tenor_published(self):
+        conn = memory_db()
+        db.upsert_rates(conn, "SOFR", [
+            ("2026-08-14", "O/N", 3.62), ("2026-08-14", "30D", 3.63617),
+            ("2026-08-14", "90D", 3.63113), ("2026-08-14", "180D", 3.66204)])
+        d = serve.get_latest(conn, "SOFR")
+        self.assertTrue(all(r["as_of"] is None for r in d["rows"]))
+
+    def test_only_declared_headline_tenors_are_carried(self):
+        """A tenor a source has genuinely retired must not reappear forever.
+        BNM discontinued 12M KLIBOR in Jan 2023 and it is not a headline."""
+        conn = memory_db()
+        db.upsert_rates(conn, "KLIBOR", [
+            ("2023-01-10", "12M", 3.90), ("2023-01-10", "3M", 3.50),
+            ("2026-08-18", "1M", 3.01), ("2026-08-18", "3M", 3.46),
+            ("2026-08-18", "6M", 3.49)])
+        d = serve.get_latest(conn, "KLIBOR")
+        self.assertNotIn("12M", [r["tenor"] for r in d["rows"]])
+
+    def test_a_tenor_with_no_history_at_all_is_not_invented(self):
+        conn = memory_db()
+        db.upsert_rates(conn, "SOFR", [("2026-08-17", "30D", 3.63649)])
+        d = serve.get_latest(conn, "SOFR")
+        self.assertEqual([r["tenor"] for r in d["rows"]], ["30D"])
+
+    def test_rows_stay_in_tenor_order_after_the_carry(self):
+        d = serve.get_latest(self._conn(), "SOFR")
+        self.assertEqual([r["tenor"] for r in d["rows"]],
+                         ["O/N", "30D", "90D", "180D"])
 
 
 class TestThreadSafety(unittest.TestCase):

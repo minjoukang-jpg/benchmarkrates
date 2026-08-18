@@ -117,9 +117,10 @@ CURVES = {
                         "compounded 30, 90 and 180 day averages"),
         "source": "Federal Reserve Bank of New York",
         "url": "https://www.newyorkfed.org/markets/reference-rates/sofr-averages-and-index",
-        # The averages, matching how MYOR and THOR are headlined. Overnight SOFR
-        # is the underlying rate and sits in the table below.
-        "headline_tenors": ["30D", "90D", "180D"],
+        # All four on the face of the card. The overnight rate is what USD
+        # facilities actually fix against day to day, so it is not something to
+        # fold away behind a toggle.
+        "headline_tenors": ["O/N", "30D", "90D", "180D"],
     },
 }
 

@@ -154,6 +154,17 @@ button.primary { background: var(--series-1); color: #fff; border-color: transpa
 .hero .lbl { font-size: 11px; color: var(--text-secondary); font-weight: 600; }
 .hero .chg { font-size: 11px; font-variant-numeric: tabular-nums; }
 .heroes .asof { width: 100%; margin: 2px 0 0; font-size: 12px; color: var(--text-muted); }
+/* Four figures will not sit on one line in a single-benchmark column, and a
+   3-then-1 wrap reads as an accident. Two by two is deliberate and keeps the
+   type size, which matters more than fitting one row. */
+.heroes[data-n="4"] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                      gap: 12px 18px; }
+.heroes[data-n="4"] .asof { grid-column: 1 / -1; }
+/* A value carried from an earlier date than the card's heading. Always shown
+   with that date, so the card cannot imply it is today's fixing. */
+.held { color: var(--text-muted); }
+.tnote { color: var(--text-muted); font-size: 11px; margin-left: 5px;
+         font-variant-numeric: tabular-nums; }
 
 /* The full tenor table repeats the headline figures for most curves now that
    each card shows three, so it collapses by default and the card keeps only
@@ -301,9 +312,16 @@ const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 3) => v === null || v === undefined ? "–" : v.toFixed(d);
 const iso = (d) => d.toISOString().slice(0, 10);
 
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function niceDate(s) {
   const [y, m, d] = s.split("-");
-  return `${+d} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m-1]} ${y}`;
+  return `${+d} ${MONTHS[+m-1]} ${y}`;
+}
+// Day and month only. Used where a date sits beside a figure and the year
+// would crowd it out without telling the reader anything.
+function shortDate(s) {
+  const [, m, d] = s.split("-");
+  return `${+d} ${MONTHS[+m-1]}`;
 }
 async function getJSON(url) {
   const r = await fetch(url);
@@ -442,14 +460,22 @@ async function loadCardTable(m) {
   const heads = (d.headlines || []).map(t => byTenor[t]).filter(Boolean);
   if (!heads.length && d.rows.length) heads.push(d.rows[0]);
 
-  $("heroes-" + m.curve).innerHTML = heads.map(h => {
+  const box = $("heroes-" + m.curve);
+  // Drives the two-by-two layout at four figures; see .heroes[data-n] in the CSS.
+  box.dataset.n = heads.length;
+  box.innerHTML = heads.map(h => {
     const c = h.change_bp;
     const cls = c === null ? "chg-flat" : c > 0 ? "chg-rise" : c < 0 ? "chg-fall" : "chg-flat";
     const txt = c === null ? "" : `${c > 0 ? "+" : ""}${c.toFixed(1)} bp`;
+    // as_of is set only when the source had not yet published this tenor for
+    // the card's date, so the figure is the last one it did publish. Naming
+    // that date is the whole point: an unlabelled stale rate is worse than no
+    // rate at all on a card people price off.
+    const held = h.as_of ? `<span class="held">${txt ? " &middot; " : ""}as of ${shortDate(h.as_of)}</span>` : "";
     return `<div class="hero">
               <span class="val">${fmt(h.rate)}%</span>
               <span class="lbl">${h.tenor}</span>
-              <span class="chg ${cls}">${txt}</span>
+              <span class="chg ${cls}">${txt}${held}</span>
             </div>`;
   }).join("") + `<p class="asof">${niceDate(d.date)}</p>`;
 
@@ -464,7 +490,8 @@ async function loadCardTable(m) {
     const c = r.change_bp;
     const cls = c === null ? "chg-flat" : c > 0 ? "chg-rise" : c < 0 ? "chg-fall" : "chg-flat";
     const txt = c === null ? "–" : (c > 0 ? "+" : "") + c.toFixed(1);
-    return `<tr><td>${r.tenor}</td><td>${fmt(r.rate)}</td>
+    const note = r.as_of ? `<span class="tnote">${shortDate(r.as_of)}</span>` : "";
+    return `<tr><td>${r.tenor}${note}</td><td>${fmt(r.rate)}</td>
             <td class="${cls}">${txt}</td></tr>`;
   }).join("");
   $("tbl-" + m.curve).innerHTML =

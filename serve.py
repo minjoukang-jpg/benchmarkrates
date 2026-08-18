@@ -93,20 +93,45 @@ def get_latest(conn, curve):
         # should not have to special-case the shape.
         return {"curve": curve, "date": None, "rows": [], "headlines": []}
 
+    def _change(tenor, rate, before):
+        """Change against the previous publication of this same tenor."""
+        prev = conn.execute(
+            "SELECT rate_date, rate FROM rates WHERE curve=? AND tenor=? AND rate_date<? "
+            "ORDER BY rate_date DESC LIMIT 1", (curve, tenor, before)).fetchone()
+        return {
+            "prev_rate": prev["rate"] if prev else None,
+            "prev_date": prev["rate_date"] if prev else None,
+            "change_bp": round((rate - prev["rate"]) * 100, 1) if prev else None,
+        }
+
     rows = []
     for r in conn.execute(
             "SELECT tenor, rate FROM rates WHERE curve=? AND rate_date=?",
             (curve, last)).fetchall():
-        prev = conn.execute(
+        # as_of is None when the value belongs to the card's own date, which is
+        # the normal case. See the carry-forward below for when it is not.
+        rows.append({"tenor": r["tenor"], "rate": r["rate"], "as_of": None,
+                     **_change(r["tenor"], r["rate"], last)})
+
+    # Sources do not always publish every tenor of a curve on the same day. The
+    # NY Fed routinely has the SOFR averages out for a date before overnight
+    # SOFR itself, and dropping the tenor would make the headline rate vanish
+    # from the card for a few hours. Carry the last published value instead,
+    # but only for declared headline tenors, and stamp it with its own date so
+    # the card never implies it belongs to the date in the heading.
+    present = {r["tenor"] for r in rows}
+    for tenor in db.CURVES.get(curve, {}).get("headline_tenors") or []:
+        if tenor in present:
+            continue
+        held = conn.execute(
             "SELECT rate_date, rate FROM rates WHERE curve=? AND tenor=? AND rate_date<? "
-            "ORDER BY rate_date DESC LIMIT 1", (curve, r["tenor"], last)).fetchone()
-        rows.append({
-            "tenor": r["tenor"],
-            "rate": r["rate"],
-            "prev_rate": prev["rate"] if prev else None,
-            "prev_date": prev["rate_date"] if prev else None,
-            "change_bp": round((r["rate"] - prev["rate"]) * 100, 1) if prev else None,
-        })
+            "ORDER BY rate_date DESC LIMIT 1", (curve, tenor, last)).fetchone()
+        if not held:
+            continue
+        rows.append({"tenor": tenor, "rate": held["rate"],
+                     "as_of": held["rate_date"],
+                     **_change(tenor, held["rate"], held["rate_date"])})
+
     rows.sort(key=lambda x: db.tenor_sort_key(x["tenor"]))
     return {"curve": curve, "date": last, "rows": rows,
             # Resolved server-side so the local and hosted dashboards always
