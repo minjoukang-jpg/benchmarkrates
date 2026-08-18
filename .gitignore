@@ -18,3 +18,6 @@ __pycache__/
 # locally, and in GitHub Actions secrets when hosted, so that nothing secret
 # ever sits in this folder and the whole folder is safe to upload.
 .streamlit/secrets.toml
+
+# Backfill and run logs are working artefacts, never committed.
+*.log
