@@ -37,9 +37,10 @@ CURVES = {
         "description": "Kuala Lumpur Interbank Offered Rate",
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-klibor",
-        # 6M as before. Change to "3M" if you would rather it sit alongside the
-        # MYOR 3M card, which makes the KLIBOR-to-MYOR gap visible at a glance.
-        "headline_tenors": ["6M"],
+        # 1M/3M/6M are the live tenors: BNM discontinued 2M, 9M and 12M in
+        # Jan 2023, so this is the whole published curve, and it lines up with
+        # the MYOR card below so the KLIBOR-to-MYOR gap reads at a glance.
+        "headline_tenors": ["1M", "3M", "6M"],
     },
     "MYOR": {
         "currency": "MYR",
@@ -49,7 +50,9 @@ CURVES = {
                         "transitioning to from KLIBOR, with compounded 1M, 3M and 6M averages"),
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-myor",
-        "headline_tenors": ["3M"],
+        # The compounded averages. O/N is in the table below; the averages
+        # are what a facility actually prices off.
+        "headline_tenors": ["1M", "3M", "6M"],
     },
     "MYORI": {
         "currency": "MYR",
@@ -59,13 +62,14 @@ CURVES = {
                         "based on Islamic money market transactions"),
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-myori",
-        "headline_tenors": ["3M"],
+        "headline_tenors": ["1M", "3M", "6M"],
     },
     "MGS": {
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGS",
-        "headline_tenors": ["10Y"],
+        # 5Y, 7Y and 10Y: the tenors project debt is actually benchmarked to.
+        "headline_tenors": ["5Y", "7Y", "10Y"],
         "description": "Malaysian Government Securities benchmark closing yields (conventional)",
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
@@ -74,7 +78,7 @@ CURVES = {
         "currency": "MYR",
         "market": "Malaysia",
         "label": "MYR MGII (Islamic)",
-        "headline_tenors": ["10Y"],
+        "headline_tenors": ["5Y", "7Y", "10Y"],
         "description": ("Malaysian Government Investment Issues benchmark closing yields. "
                         "This is the Shariah-compliant benchmark, and the correct reference "
                         "for Sukuk rather than conventional MGS"),
@@ -85,7 +89,9 @@ CURVES = {
         "currency": "THB",
         "market": "Thailand",
         "label": "THB THOR",
-        "headline_tenors": ["3M"],
+        # The compounded averages, matching the MYOR card. THOR itself is
+        # overnight and sits in the table below.
+        "headline_tenors": ["1M", "3M", "6M"],
         "description": ("Thai Overnight Repurchase Rate, Thailand's transaction-based "
                         "reference rate, with compounded 1M, 3M and 6M averages"),
         "source": "ThaiBMA, calculation agent for Bank of Thailand",

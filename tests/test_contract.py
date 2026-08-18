@@ -707,10 +707,25 @@ class TestHeadlineTenors(unittest.TestCase):
             db.headline_tenors("BVAL", ["1M", "3M", "3Y", "5Y", "7Y", "10Y", "25Y"]),
             ["3Y", "5Y", "7Y"])
 
-    def test_single_headline_curves_return_one(self):
-        self.assertEqual(db.headline_tenors("MGS", ["3Y", "5Y", "7Y", "10Y"]), ["10Y"])
-        self.assertEqual(db.headline_tenors("KLIBOR", ["1M", "3M", "6M"]), ["6M"])
+    def test_government_curves_show_five_seven_and_ten_year(self):
+        """Project debt is benchmarked at 5Y, 7Y and 10Y, so both the
+        conventional and the Islamic government curve headline those."""
+        for curve in ("MGS", "MGII"):
+            self.assertEqual(
+                db.headline_tenors(curve, ["3Y", "5Y", "7Y", "10Y", "20Y"]),
+                ["5Y", "7Y", "10Y"], curve)
+
+    def test_money_market_curves_show_one_three_and_six_month(self):
+        for curve in ("KLIBOR", "MYOR", "MYORI", "THOR"):
+            self.assertEqual(
+                db.headline_tenors(curve, ["O/N", "1M", "3M", "6M"]),
+                ["1M", "3M", "6M"], curve)
+
+    def test_sofr_stays_single_because_it_publishes_one_tenor(self):
+        """SOFR is overnight only. There is no second or third figure to show,
+        so the card is a single hero by necessity, not by preference."""
         self.assertEqual(db.headline_tenors("SOFR", ["O/N"]), ["O/N"])
+        self.assertEqual(set(sources.CURVE_TENORS["SOFR"]), {"O/N"})
 
     def test_results_are_in_tenor_order(self):
         out = db.headline_tenors("BVAL", ["7Y", "3Y", "5Y"])
