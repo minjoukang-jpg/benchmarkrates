@@ -28,6 +28,7 @@ import re
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -897,3 +898,151 @@ def probe(curve):
             day -= datetime.timedelta(days=1)
         return Outcome(EMPTY, [], label, "no publication in the last 7 weekdays")
     raise ValueError(f"unknown curve {curve}")
+
+
+# --------------------------------------------------------------------------
+# THB THOR averages - Bank of Thailand statistics page
+#
+# ThaiBMA's JSON API serves the overnight rate historically but always returns
+# today's values for the 1M/3M/6M averages, so their history cannot be built
+# from it. BOT's statistics report FM_RT_013 does carry them: selecting a
+# calendar month returns every business day in that month, which makes a
+# month-at-a-time backfill practical.
+#
+# It is an ASP.NET WebForms page, so each request needs the viewstate from a
+# fresh GET. That is more fragile than a JSON API, which is why it is used only
+# for the averages that ThaiBMA cannot provide.
+# --------------------------------------------------------------------------
+
+BOT_THOR_URL = ("https://app.bot.or.th/BTWS_STAT/statistics/"
+                "BOTWEBSTAT.aspx?reportID=945&language=Eng")
+
+# Row labels in the report mapped to our tenor vocabulary.
+BOT_THOR_ROWS = {
+    "thor": "O/N",
+    "1 month": "1M",
+    "3 months": "3M",
+    "6 months": "6M",
+}
+
+_BOT_DATE_RE = re.compile(r"(\d{2})\s+([A-Z]{3})\s+(\d{4})")
+_BOT_MONTHS = {m: i for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], start=1)}
+
+
+def _bot_hidden(html, name):
+    m = re.search(r'name="%s"[^>]*value="([^"]*)"' % re.escape(name), html)
+    return m.group(1) if m else ""
+
+
+def parse_bot_thor(html):
+    """Returns [(date_iso, tenor, rate)] from the FM_RT_013 table."""
+    # The report pads its row labels with &nbsp;, so entities have to go before
+    # whitespace is collapsed or "1 Month" never matches.
+    def clean_row(tr):
+        text = _TAG_RE.sub(" ", tr)
+        text = text.replace("&nbsp;", " ").replace("&#160;", " ")
+        return re.sub(r"\s+", " ", text).strip()
+
+    rows = [clean_row(tr) for tr in _ROW_RE.findall(html)]
+
+    header = next((r for r in rows if _BOT_DATE_RE.search(r)), None)
+    if not header:
+        raise FetchError("BOT THOR report has no date header - layout changed")
+
+    dates = []
+    for dd, mon, yyyy in _BOT_DATE_RE.findall(header):
+        month = _BOT_MONTHS.get(mon)
+        if not month:
+            raise FetchError("BOT THOR report has an unknown month %r" % mon)
+        dates.append("%s-%02d-%s" % (yyyy, month, dd))
+
+    out = []
+    for raw in rows:
+        # Data rows look like "1 THOR 0.99 ..." or "3 1 Month 0.99 ...", with a
+        # leading sequence number. Strip it, then match the label.
+        line = re.sub(r"^\d+\s+", "", raw).strip()
+        label = None
+        for key, tenor in BOT_THOR_ROWS.items():
+            if line.lower().startswith(key):
+                label = tenor
+                line = line[len(key):]
+                break
+        if label is None:
+            continue
+
+        values = line.split()
+        for date, cell in zip(dates, values):
+            try:
+                out.append((date, label, float(cell.replace(",", ""))))
+            except ValueError:
+                continue          # "n.a." before publication
+    return out
+
+
+def fetch_thor_month(year, month):
+    """THOR and its averages for one calendar month, from BOT."""
+    def strategy():
+        page, status = _request(BOT_THOR_URL, timeout=120)
+        if status >= 400:
+            raise FetchError("BOT returned HTTP %d for the THOR report" % status)
+
+        form = {
+            "__EVENTTARGET": "", "__EVENTARGUMENT": "", "__LASTFOCUS": "",
+            "__VIEWSTATE": _bot_hidden(page, "__VIEWSTATE"),
+            "__VIEWSTATEGENERATOR": _bot_hidden(page, "__VIEWSTATEGENERATOR"),
+            "__EVENTVALIDATION": _bot_hidden(page, "__EVENTVALIDATION"),
+            "drpPeriod": "DAY",
+            # The dropdowns use masked values the server recombines.
+            "drpFromMonth": "xxxx%02dxx" % month, "drpFromYear": "%dxxxx" % year,
+            "drpToMonth": "xxxx%02dxx" % month, "drpToYear": "%dxxxx" % year,
+            "btnSubmit": "Submit",
+        }
+        if not form["__VIEWSTATE"]:
+            raise FetchError("BOT THOR page returned no viewstate - layout changed")
+
+        body, status = _request(
+            BOT_THOR_URL, data=urllib.parse.urlencode(form).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=180)
+        if status >= 400:
+            raise FetchError("BOT rejected the THOR query with HTTP %d" % status)
+        return parse_bot_thor(body), False
+
+    out = _try_strategies([("bot-fm-rt-013", strategy)])
+    if out.ok:
+        validate_rows("THOR", out.rows)
+    return out
+
+
+def fetch_thor_recent(end=None, months=2):
+    """THOR and its averages for the last `months` calendar months, from BOT.
+
+    Used by the daily job in place of ThaiBMA. BOT returns the overnight rate
+    AND the averages for every business day of a month, so two requests cover
+    any realistic gap - against up to forty-five one-per-day calls to ThaiBMA
+    that would still leave the averages stuck at today's value.
+    """
+    end = end or datetime.date.today()
+    wanted, cursor = [], end.replace(day=1)
+    for _ in range(max(1, months)):
+        wanted.append((cursor.year, cursor.month))
+        cursor = (cursor - datetime.timedelta(days=1)).replace(day=1)
+
+    rows, errors = [], []
+    for year, month in wanted:
+        out = fetch_thor_month(year, month)
+        if out.ok:
+            rows.extend(out.rows)
+        elif out.failed:
+            errors.append("%04d-%02d: %s" % (year, month, out.detail))
+
+    if not rows:
+        if errors:
+            return Outcome(FAILED, [], None, "; ".join(errors))
+        return Outcome(EMPTY, [], "bot-fm-rt-013", "no data in the last %d months" % months)
+    detail = "%d month(s)" % len(wanted)
+    if errors:
+        detail += "; %d failed (%s)" % (len(errors), errors[0])
+    return Outcome(OK, rows, "bot-fm-rt-013", detail)

@@ -59,6 +59,13 @@ def _fetch(conn, curve, full):
                  else today - datetime.timedelta(days=LOOKBACK_DAYS))
         return sources.fetch_myor(curve, start, today), None
 
+    # THOR's daily path uses BOT rather than ThaiBMA: two requests cover the
+    # overnight rate and the averages for every business day of two months,
+    # where ThaiBMA would need one call per day and still return only today's
+    # averages. ThaiBMA is still used for the deep overnight backfill.
+    if curve == "THOR" and not full:
+        return sources.fetch_thor_recent(today), None
+
     if curve in PER_DAY_CURVES:
         if full:
             start = {"BVAL": BVAL_HISTORY_START,

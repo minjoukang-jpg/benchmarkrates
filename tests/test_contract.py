@@ -390,6 +390,57 @@ class TestThorParsing(unittest.TestCase):
             sources.validate_rows("THOR", [("2026-08-17", "O/N", 108.78)])
 
 
+BOT_THOR_TABLE = (
+    "<table>"
+    "<tr><td>&nbsp;</td><td>&nbsp;</td><td>15 MAR 2024 </td><td>14 MAR 2024 </td></tr>"
+    "<tr><td>1</td><td>THOR</td><td>2.49426</td><td>2.49353</td></tr>"
+    "<tr><td>2</td><td>THOR Average</td><td>&nbsp;</td><td>&nbsp;</td></tr>"
+    "<tr><td>3</td><td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;1 Month</td>"
+    "<td>2.49606</td><td>2.49610</td></tr>"
+    "<tr><td>4</td><td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3 Months</td>"
+    "<td>2.50093</td><td>2.50097</td></tr>"
+    "<tr><td>5</td><td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;6 Months</td>"
+    "<td>2.49124</td><td>n.a.</td></tr>"
+    "</table>")
+
+
+class TestBotThorParsing(unittest.TestCase):
+    """BOT's report supplies the THOR averages that ThaiBMA will not serve
+    historically. Its row labels are padded with &nbsp;, which silently made
+    every average row unmatchable until the entities were stripped."""
+
+    def test_all_four_tenors_parsed(self):
+        rows = sources.parse_bot_thor(BOT_THOR_TABLE)
+        got = {(d, t): r for d, t, r in rows}
+        self.assertEqual(got[("2024-03-15", "O/N")], 2.49426)
+        self.assertEqual(got[("2024-03-15", "1M")], 2.49606)
+        self.assertEqual(got[("2024-03-15", "3M")], 2.50093)
+        self.assertEqual(got[("2024-03-15", "6M")], 2.49124)
+
+    def test_nbsp_padding_does_not_hide_the_averages(self):
+        """The regression. Without entity stripping only O/N came back."""
+        tenors = {t for _, t, _ in sources.parse_bot_thor(BOT_THOR_TABLE)}
+        self.assertEqual(tenors, {"O/N", "1M", "3M", "6M"})
+
+    def test_dates_map_to_the_right_columns(self):
+        got = {(d, t): r for d, t, r in sources.parse_bot_thor(BOT_THOR_TABLE)}
+        self.assertEqual(got[("2024-03-14", "O/N")], 2.49353)
+        self.assertEqual(got[("2024-03-14", "1M")], 2.49610)
+
+    def test_na_cells_are_skipped(self):
+        got = {(d, t) for d, t, _ in sources.parse_bot_thor(BOT_THOR_TABLE)}
+        self.assertNotIn(("2024-03-14", "6M"), got)
+
+    def test_summary_row_is_not_treated_as_a_rate(self):
+        """The bare 'THOR Average' row carries no numbers."""
+        rows = sources.parse_bot_thor(BOT_THOR_TABLE)
+        self.assertEqual(len([r for d, t, r in rows if d == "2024-03-15"]), 4)
+
+    def test_missing_header_raises(self):
+        with self.assertRaises(sources.FetchError):
+            sources.parse_bot_thor("<table><tr><td>1</td><td>THOR</td></tr></table>")
+
+
 class TestValidation(unittest.TestCase):
 
     def test_accepts_good_data(self):
