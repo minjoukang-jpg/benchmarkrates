@@ -135,6 +135,33 @@ def data_fingerprint():
     return "|".join(parts)
 
 
+# The source files whose logic shapes what the cached loaders return. A
+# code-only deploy changes no CSV, so keying the caches on the data alone left
+# them serving results computed by the previous version of this code. That is
+# how the SOFR overnight rate stayed off the card after it was put back: the
+# data was identical, so nothing invalidated load_latest.
+_SOURCE_FILES = ("db.py", "serve.py", "streamlit_app.py")
+
+
+def code_fingerprint():
+    """Signature of the code behind the cached values.
+
+    Content hashed rather than mtime: a fresh git checkout stamps every file
+    with the checkout time, so mtime says a file changed when it did not, and
+    says nothing when a rollback restores an older version at a newer time.
+    """
+    digest = hashlib.sha1()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in _SOURCE_FILES:
+        digest.update(name.encode("utf-8"))
+        try:
+            with open(os.path.join(here, name), "rb") as fh:
+                digest.update(fh.read())
+        except OSError:
+            digest.update(b"<unreadable>")
+    return digest.hexdigest()[:16]
+
+
 @st.cache_resource
 def database_path(fingerprint):
     """Path to a readable database, built from the committed CSVs when hosted.
@@ -200,7 +227,9 @@ def _conn():
 # Each loader takes the fingerprint as its first argument purely as a cache key.
 # Without it these would keep returning results computed from the previous set of
 # CSVs, so the page would show stale rates even after the database was rebuilt.
-# The ttl is a backstop for the case where mtime somehow does not change.
+# The fingerprint covers the code as well as the data, so a deploy that changes
+# how a value is derived takes effect on the next run rather than whenever the
+# ttl happens to lapse. The ttl remains only as a backstop.
 
 @st.cache_data(ttl=900)
 def load_meta(fp):
@@ -254,7 +283,10 @@ def short_date(iso):
 # Page
 # --------------------------------------------------------------------------
 
-FP = data_fingerprint()   # one signature per script run, keys every cache
+# One signature per script run, keying every cache. Both halves are needed: the
+# data half catches the daily CSV commit, the code half catches a deploy that
+# changes how the data is read without changing the data itself.
+FP = f"{data_fingerprint()}#{code_fingerprint()}"
 if database_path(FP) is None:
     st.error(
         "No rate data found in this deployment. The repository should contain "
