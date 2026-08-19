@@ -1003,6 +1003,30 @@ class TestCarryForwardOfHeadlineTenors(unittest.TestCase):
                          ["O/N", "30D", "90D", "180D"])
 
 
+class TestComparisonOptions(unittest.TestCase):
+    """What the comparison picker may offer. Declared headline tenors have to
+    stay offerable even on a day their source has not published them."""
+
+    def test_meta_exposes_the_declared_headline_tenors(self):
+        conn = memory_db()
+        db.upsert_rates(conn, "SOFR", [("2026-08-17", "30D", 3.63649)])
+        row = next(m for m in serve.get_meta(conn) if m["curve"] == "SOFR")
+        self.assertEqual(row["headline_tenors"], ["O/N", "30D", "90D", "180D"])
+
+    def test_declared_headlines_are_not_narrowed_by_what_published_today(self):
+        """active_tenors reflects the latest date only. The NY Fed routinely
+        has the averages out before overnight SOFR, and O/N must not vanish
+        from the comparison list for those few hours."""
+        conn = memory_db()
+        db.upsert_rates(conn, "SOFR", [
+            ("2026-08-14", "O/N", 3.62), ("2026-08-14", "30D", 3.63617),
+            ("2026-08-17", "30D", 3.63649)])
+        row = next(m for m in serve.get_meta(conn) if m["curve"] == "SOFR")
+        self.assertNotIn("O/N", row["active_tenors"])
+        self.assertIn("O/N", row["headline_tenors"])
+        self.assertIn("O/N", row["tenors"])
+
+
 class TestCrossCurveSeries(unittest.TestCase):
     """One chart can hold series from several markets, so a line is identified
     by curve and tenor together."""

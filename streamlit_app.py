@@ -484,11 +484,27 @@ with c2:
 # flipping between two charts. All the curves are quoted in percent, so they
 # share an axis honestly; what differs is the currency, which is the point of
 # the comparison rather than a problem with it.
+def comparable_tenors(m):
+    """What a market can be compared at: the tenors it is currently publishing,
+    plus any headline tenor it simply has not published yet today.
+
+    Without the second half, overnight SOFR drops out of this list whenever the
+    NY Fed has the averages out before the overnight rate, which is most
+    mornings. That is the one tenor most likely to be wanted here, and the card
+    already carries it forward, so the two would disagree.
+    """
+    live = list(m["active_tenors"] or m["tenors"])
+    for tenor in db.CURVES.get(m["curve"], {}).get("headline_tenors") or []:
+        if tenor not in live and tenor in m["tenors"]:
+            live.append(tenor)
+    return sorted(live, key=db.tenor_sort_key)
+
+
 other_options, other_lookup = [], {}
 for m in with_data:
     if m["curve"] == curve:
         continue
-    for tenor in (m["active_tenors"] or m["tenors"]):
+    for tenor in comparable_tenors(m):
         label = f"{m['label']} {tenor}"
         other_options.append(label)
         other_lookup[label] = (m["curve"], tenor)
@@ -549,21 +565,53 @@ else:
         domain = [names[k] for k in order]
         scale = alt.Scale(domain=domain, range=palette()[:len(domain)])
 
-        chart = (
-            alt.Chart(frame)
-            .mark_line(strokeWidth=2)
+        # A dashed guide that follows the cursor, with every series' value for
+        # that date. Reading a level off a line by eye against the axis is
+        # guesswork at 3 decimal places, and hovering a line only ever gives
+        # you that one line: the whole point here is the gap between them.
+        hover = alt.selection_point(
+            fields=["Date"], nearest=True, on="pointerover", empty=False,
+            clear="pointerout")
+
+        base = alt.Chart(frame).encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y("Rate:Q", title="Rate %",
+                    scale=alt.Scale(zero=False, nice=True)),
+            color=alt.Color("Series:N", scale=scale, sort=domain,
+                            legend=alt.Legend(title=None, orient="bottom")),
+        )
+        lines = base.mark_line(strokeWidth=2)
+        marks = base.mark_point(size=70, filled=True).transform_filter(hover)
+
+        # One rule carries the whole cross-section. Without it the tooltip would
+        # report only whichever line the cursor happened to be nearest.
+        #
+        # Pivoted in pandas rather than with transform_pivot so the missing
+        # values can be formatted here. Markets keep different holidays, so on
+        # any given date one may have published and another not; left to Vega
+        # those cells format as "NaN", which reads like a broken number rather
+        # than a market that was closed.
+        guide_frame = (frame.pivot(index="Date", columns="Series", values="Rate")
+                       .reindex(columns=domain).reset_index())
+        for name in domain:
+            guide_frame[name] = guide_frame[name].map(
+                lambda v: "–" if pd.isna(v) else f"{v:.3f}")
+
+        guide = (
+            alt.Chart(guide_frame)
+            .mark_rule(strokeDash=[4, 4], strokeWidth=1)
             .encode(
                 x=alt.X("Date:T", title=None),
-                y=alt.Y("Rate:Q", title="Rate %",
-                        scale=alt.Scale(zero=False, nice=True)),
-                color=alt.Color("Series:N", scale=scale, sort=domain,
-                                legend=alt.Legend(title=None, orient="bottom")),
-                tooltip=[alt.Tooltip("Date:T", title="Date"),
-                         alt.Tooltip("Series:N", title="Series"),
-                         alt.Tooltip("Rate:Q", format=".3f", title="Rate %")],
+                opacity=alt.condition(hover, alt.value(0.55), alt.value(0)),
+                # field=/type= rather than shorthand: a series name can contain
+                # a slash ("USD SOFR O/N") and shorthand is parsed, not literal.
+                tooltip=([alt.Tooltip(field="Date", type="temporal", title="Date")]
+                         + [alt.Tooltip(field=name, type="nominal", title=name)
+                            for name in domain]),
             )
-            .properties(height=380)
+            .add_params(hover)
         )
+        chart = (lines + marks + guide).properties(height=380)
         # Deliberately not .interactive(). Vega binds the mouse wheel to zoom,
         # so scrolling the page with the cursor over the chart silently rescales
         # both axes and can push series out of view with no obvious way back.
@@ -630,18 +678,46 @@ else:
 
     if records:
         frame = pd.DataFrame(records)
+        shape_names = [c for c in (f"Latest ({nice_date(now_shape['date'])})"
+                                   if now_shape["date"] else None,
+                                   f"Earlier ({nice_date(then_shape['date'])})"
+                                   if then_shape["date"] else None) if c]
+
+        # Same guide as the history chart: hovering a tenor gives both dates at
+        # once, which is what makes the move between them readable.
+        shape_hover = alt.selection_point(
+            fields=["Tenor"], nearest=True, on="pointerover", empty=False,
+            clear="pointerout")
+
         base = alt.Chart(frame).encode(
             x=alt.X("Tenor:N", sort=order, title=None),
             y=alt.Y("Rate:Q", title="Rate %", scale=alt.Scale(zero=False, nice=True)),
             color=alt.Color("Curve:N",
                             scale=alt.Scale(range=palette()[:2]),
                             legend=alt.Legend(title=None, orient="bottom")),
-            tooltip=[alt.Tooltip("Curve:N"), alt.Tooltip("Tenor:N"),
-                     alt.Tooltip("Rate:Q", format=".3f", title="Rate %")],
+        )
+        shape_guide_frame = (frame.pivot(index="Tenor", columns="Curve", values="Rate")
+                             .reindex(columns=shape_names).reset_index())
+        for name in shape_names:
+            shape_guide_frame[name] = shape_guide_frame[name].map(
+                lambda v: "–" if pd.isna(v) else f"{v:.3f}")
+
+        shape_guide = (
+            alt.Chart(shape_guide_frame)
+            .mark_rule(strokeDash=[4, 4], strokeWidth=1)
+            .encode(
+                x=alt.X("Tenor:N", sort=order, title=None),
+                opacity=alt.condition(shape_hover, alt.value(0.55), alt.value(0)),
+                tooltip=([alt.Tooltip(field="Tenor", type="nominal")]
+                         + [alt.Tooltip(field=name, type="nominal", title=name)
+                            for name in shape_names]),
+            )
+            .add_params(shape_hover)
         )
         st.altair_chart(
-            (base.mark_line(strokeWidth=2) + base.mark_point(size=60, filled=True))
-            .properties(height=320),
+            (base.mark_line(strokeWidth=2)
+             + base.mark_point(size=60, filled=True)
+             + shape_guide).properties(height=320),
             use_container_width=True)
 
 st.divider()

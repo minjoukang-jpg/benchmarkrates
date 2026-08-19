@@ -594,10 +594,20 @@ function renderControls() {
 
   // Every tenor of every other market, so the gap between, say, USD SOFR and
   // PHP BVAL can be read straight off one chart.
+  // Tenors a market is currently publishing, plus any headline tenor it has
+  // simply not published yet today. Without the second half, overnight SOFR
+  // drops out of this list whenever the NY Fed has the averages out before the
+  // overnight rate, which is most mornings, and the card already carries it.
+  const comparable = (x) => {
+    const live = ((x.active_tenors && x.active_tenors.length) ? x.active_tenors : x.tenors).slice();
+    (x.headline_tenors || []).forEach(t => {
+      if (!live.includes(t) && x.tenors.includes(t)) live.push(t);
+    });
+    return live;
+  };
   const options = state.meta
     .filter(x => !m || x.curve !== m.curve)
-    .flatMap(x => ((x.active_tenors && x.active_tenors.length) ? x.active_tenors : x.tenors)
-      .map(t => ({ key: seriesKey(x.curve, t), label: `${x.label} ${t}` })))
+    .flatMap(x => comparable(x).map(t => ({ key: seriesKey(x.curve, t), label: `${x.label} ${t}` })))
     .filter(o => !state.compare.includes(o.key));
   $("comparePick").innerHTML =
     `<option value="">Add a market…</option>` +
@@ -762,7 +772,7 @@ function drawSeries() {
   });
 
   svg += `<g id="cross" style="display:none">
-            <line class="axisline" y1="${P.t}" y2="${P.t+ih}" stroke-dasharray="3 3"/></g>`;
+            <line class="axisline" y1="${P.t}" y2="${P.t+ih}" stroke-dasharray="4 4"/></g>`;
   svg += `<rect id="hit" x="${P.l}" y="${P.t}" width="${iw}" height="${ih}" fill="transparent"/>`;
   svg += `</svg>`;
   host.innerHTML = svg;
@@ -893,11 +903,63 @@ function drawShape() {
     svg += `<text class="endlabel" x="${P.l+iw+8}" y="${(Y(last.rate)+4).toFixed(1)}"
              fill="${col}">${fmt(last.rate, 2)}</text>`;
   });
+  // Same dashed guide as the history chart. The per-point <title> above only
+  // ever gives one series on a slow hover; this gives both dates at the tenor
+  // under the cursor, which is what makes the move between them readable.
+  svg += `<g id="shapeCross" style="display:none">
+            <line class="axisline" y1="${P.t}" y2="${P.t+ih}" stroke-dasharray="4 4"/></g>`;
+  svg += `<rect id="shapeHit" x="${P.l}" y="${P.t}" width="${iw}" height="${ih}" fill="transparent"/>`;
   svg += `</svg>`;
   host.innerHTML = svg;
 
   $("shapeLegend").innerHTML = sets.map(([name, s, col]) =>
     `<span><i style="background:${col}"></i>${name} - ${niceDate(s.date)}</span>`).join("");
+
+  attachShapeGuide(host, sets, labels, X, P, ih);
+}
+
+function attachShapeGuide(host, sets, labels, X, P, ih) {
+  const svg = host.querySelector("svg");
+  const hit = host.querySelector("#shapeHit");
+  const cross = host.querySelector("#shapeCross");
+  if (!hit || !cross) return;
+  const line = cross.querySelector("line");
+  const tip = $("tip");
+
+  const move = (ev) => {
+    const r = svg.getBoundingClientRect();
+    const x = (ev.clientX - r.left) * (1000 / r.width);
+    // Nearest tenor rather than the one to the left, so the guide snaps to
+    // whichever label the cursor is actually closest to.
+    let best = 0, bestD = Infinity;
+    labels.forEach((t, i) => {
+      const d = Math.abs(X(t) - x);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    const tenor = labels[best];
+
+    cross.style.display = "";
+    line.setAttribute("x1", X(tenor).toFixed(1));
+    line.setAttribute("x2", X(tenor).toFixed(1));
+
+    const rows = sets.map(([name, sset, col]) => {
+      const p = sset.points.find(q => q.tenor === tenor);
+      return `<div class="r"><i style="display:inline-block;width:10px;height:3px;border-radius:2px;
+              background:${col}"></i>${name}<b>${p ? fmt(p.rate) + "%" : "–"}</b></div>`;
+    }).join("");
+    tip.innerHTML = `<div class="d">${tenor}</div>${rows}`;
+    tip.classList.add("on");
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let lx = ev.clientX + 14, ly = ev.clientY - th / 2;
+    if (lx + tw > innerWidth - 8) lx = ev.clientX - tw - 14;
+    tip.style.left = Math.max(8, lx) + "px";
+    tip.style.top = Math.max(8, Math.min(innerHeight - th - 8, ly)) + "px";
+  };
+  const leave = () => { cross.style.display = "none"; tip.classList.remove("on"); };
+  hit.addEventListener("mousemove", move);
+  hit.addEventListener("mouseleave", leave);
+  hit.addEventListener("touchmove", (e) => { move(e.touches[0]); e.preventDefault(); }, {passive:false});
+  hit.addEventListener("touchend", leave);
 }
 
 /* ---------------- wiring ---------------- */

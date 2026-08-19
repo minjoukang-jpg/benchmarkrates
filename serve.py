@@ -68,6 +68,9 @@ def get_meta(conn):
             "source": meta["source"], "url": meta["url"],
             "rows": row["n"], "first_date": row["a"], "last_date": row["b"],
             "tenors": tenors, "active_tenors": active, "age_days": age,
+            # Declared, not derived: the comparison picker needs to offer a
+            # headline tenor even on a day its source has not published it yet.
+            "headline_tenors": list(meta.get("headline_tenors") or []),
             # Counted in weekdays against a per-source tolerance, so a weekend
             # or a public holiday never reads as stale.
             "stale": missed is not None and missed > tolerance,
