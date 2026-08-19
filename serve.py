@@ -65,6 +65,7 @@ def get_meta(conn):
         out.append({
             "curve": curve, "label": meta["label"], "currency": meta["currency"],
             "market": meta["market"], "description": meta["description"],
+            "explainer": meta.get("explainer", ""),
             "source": meta["source"], "url": meta["url"],
             "rows": row["n"], "first_date": row["a"], "last_date": row["b"],
             "tenors": tenors, "active_tenors": active, "age_days": age,

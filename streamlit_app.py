@@ -15,6 +15,7 @@ byte-for-byte.
 
 import contextlib
 import datetime
+import html
 import hashlib
 import importlib
 import os
@@ -343,6 +344,8 @@ st.markdown("""
 /* Money market vs government, matching the local dashboard. */
 .grp-head { font-size:10px; font-weight:650; text-transform:uppercase;
             letter-spacing:.07em; opacity:.55; margin:14px 0 2px; }
+.curve-label { margin:0 0 2px; cursor:help; }
+.curve-label strong { border-bottom:1px dotted rgba(128,128,128,.55); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -366,7 +369,13 @@ def render_card(curve):
     # resolved by get_latest, so both dashboards agree.
     heads = [by_tenor[t] for t in latest["headlines"] if t in by_tenor] or [rows[0]]
 
-    st.markdown(f"**{m['label']}**")
+    # title= gives a plain hover tooltip at no cost in height. The same text is
+    # laid out in full in the reference section at the foot of the page, for
+    # anyone who would rather read them all together than discover them by
+    # hovering.
+    st.markdown(
+        f'<p class="curve-label" title="{html.escape(m["explainer"], quote=True)}">'
+        f'<strong>{m["label"]}</strong></p>', unsafe_allow_html=True)
     # Four figures do not fit across one card, so they go two by two. Streamlit
     # columns cannot reflow on width the way the local dashboard's CSS does,
     # which is why this is an explicit row size rather than a wrap.
@@ -740,6 +749,32 @@ else:
             use_container_width=True)
 
 st.divider()
+
+# -- what each benchmark is ------------------------------------------------
+with st.expander("What these benchmarks are"):
+    st.markdown(
+        "**Forward looking or backward looking is the distinction that matters "
+        "most here.** KLIBOR and BVAL are quoted for the period ahead. The MYOR, "
+        "MYOR-i, THOR and SOFR term figures are compounded averages of overnight "
+        "rates that have already fixed, so they describe the period just ended. "
+        "Two rates of the same tenor are therefore not interchangeable, and "
+        "swapping one for the other in a facility changes what the margin has to "
+        "carry.")
+    for entry in layout:
+        st.markdown(
+            f'<div class="mkt-head"><span class="flag">{entry["flag"]}</span>'
+            f'<span class="name">{entry["market"]}</span></div>',
+            unsafe_allow_html=True)
+        for curve_name in entry["curves"]:
+            m = meta_by_curve[curve_name]
+            span = ("no data yet" if not m["first_date"]
+                    else f"{nice_date(m['first_date'])} to {nice_date(m['last_date'])}")
+            st.markdown(
+                f"**{m['label']}** &nbsp; <span style='opacity:.6;font-size:13px'>"
+                f"{m['source']} &middot; {span}</span><br>{m['explainer']}",
+                unsafe_allow_html=True)
+            st.write("")
+
 st.caption(
     "Rates are stored exactly as published by each source and are not adjusted or "
     "interpolated. Figures are for internal reference; confirm against the primary "

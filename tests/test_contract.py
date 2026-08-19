@@ -764,6 +764,51 @@ class TestCsvRoundTrip(unittest.TestCase):
                 "SELECT curve, rate_date, tenor, rate FROM rates ORDER BY rate_date, tenor")])
 
 
+class TestBenchmarkExplainers(unittest.TestCase):
+    """Every benchmark carries a plain-language explanation, shown as a hover on
+    its card and laid out in full in the reference section."""
+
+    def test_every_curve_has_one(self):
+        for curve, meta in db.CURVES.items():
+            text = meta.get("explainer", "")
+            self.assertTrue(text, f"{curve} has no explainer")
+            self.assertGreater(len(text), 120, f"{curve} explainer is too thin")
+            self.assertTrue(text.endswith("."), curve)
+
+    def test_no_broken_hyphenation_or_double_spaces(self):
+        """These are wrapped across source lines, and a missing space either
+        joins two words or leaves "on- the-run" in the middle of a sentence."""
+        for curve, meta in db.CURVES.items():
+            text = meta["explainer"]
+            self.assertNotIn("  ", text, curve)
+            self.assertIsNone(re.search(r"\w- \w", text),
+                              f"{curve} has a hyphen split across a line break")
+
+    def test_the_api_serves_them(self):
+        conn = memory_db()
+        db.upsert_rates(conn, "SOFR", [("2026-08-17", "30D", 3.63649)])
+        row = next(m for m in serve.get_meta(conn) if m["curve"] == "SOFR")
+        self.assertEqual(row["explainer"], db.CURVES["SOFR"]["explainer"])
+
+    def test_klibor_records_the_right_discontinuation_dates(self):
+        """9M stopped at the end of 2017, six years before 2M and 12M. A comment
+        in db.py had all three ending together."""
+        text = db.CURVES["KLIBOR"]["explainer"]
+        self.assertIn("4 January 2023", text)
+        self.assertIn("2017", text)
+
+    def test_sofr_says_it_is_not_term_sofr(self):
+        """The averages are backward looking. Someone pricing off them thinking
+        they are CME Term SOFR would have the wrong rate and the wrong basis."""
+        text = db.CURVES["SOFR"]["explainer"]
+        self.assertIn("Term SOFR", text)
+        self.assertIn("backward", text)
+
+    def test_the_islamic_curves_say_which_to_use(self):
+        self.assertIn("Sukuk", db.CURVES["MGII"]["explainer"])
+        self.assertIn("Islamic", db.CURVES["MYORI"]["explainer"])
+
+
 class TestMarketLayout(unittest.TestCase):
     """Cards are grouped into market columns, left to right, each with a flag."""
 

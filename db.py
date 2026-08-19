@@ -26,6 +26,10 @@ DATA_DIR = os.path.join(HERE, "data")
 # gets sub-headings so the cards do not read as one undifferentiated run.
 CURVES = {
     "BVAL": {
+        "explainer": ("Bloomberg's valuation marks for Philippine government securities, "
+                        "distributed through PDEx. It is the standard reference for PHP debt and is "
+                        "quoted as a full yield curve from 1M out to 25Y. Project pricing here is "
+                        "usually discussed at 3Y, 5Y and 7Y."),
         "group": "Government",
         "currency": "PHP",
         "market": "Philippines",
@@ -36,6 +40,12 @@ CURVES = {
         "headline_tenors": ["3Y", "5Y", "7Y"],   # the tenors quoted most often here
     },
     "KLIBOR": {
+        "explainer": ("The rate at which Malaysian banks quote unsecured lending to each other, "
+                        "set from a daily panel submission and published by Bank Negara Malaysia. "
+                        "It is forward looking: the 3M rate is the rate for the three months ahead, "
+                        "which is what most existing MYR facilities reference. Only 1M, 3M and 6M "
+                        "are still published; 2M and 12M last fixed on 4 January 2023 and 9M at the "
+                        "end of 2017."),
         "group": "Money market",
         "currency": "MYR",
         "market": "Malaysia",
@@ -43,12 +53,19 @@ CURVES = {
         "description": "Kuala Lumpur Interbank Offered Rate",
         "source": "Bank Negara Malaysia FMIP",
         "url": "https://financialmarkets.bnm.gov.my/data-download-klibor",
-        # 1M/3M/6M are the live tenors: BNM discontinued 2M, 9M and 12M in
-        # Jan 2023, so this is the whole published curve, and it lines up with
-        # the MYOR card below so the KLIBOR-to-MYOR gap reads at a glance.
+        # 1M/3M/6M are the live tenors, which is the whole published curve
+        # today: 2M and 12M last fixed on 4 Jan 2023 and 9M at the end of 2017.
+        # It also lines up with the MYOR card so the gap reads at a glance.
         "headline_tenors": ["1M", "3M", "6M"],
     },
     "MYOR": {
+        "explainer": ("Bank Negara's transaction-based alternative to KLIBOR, built from actual "
+                        "overnight interbank borrowing rather than panel quotes. The 1M, 3M and 6M "
+                        "figures are compounded averages of overnight rates already fixed, so they "
+                        "look back over the period just ended where KLIBOR looks forward over the "
+                        "period ahead. MYOR sits structurally below KLIBOR because it carries no "
+                        "term or bank credit premium, so a facility moving from one to the other "
+                        "needs its margin re-cut rather than simply relabelled."),
         "group": "Money market",
         "currency": "MYR",
         "market": "Malaysia",
@@ -62,6 +79,9 @@ CURVES = {
         "headline_tenors": ["1M", "3M", "6M"],
     },
     "MYORI": {
+        "explainer": ("The Shariah-compliant counterpart to MYOR, computed from Islamic money "
+                        "market transactions and published alongside it. Where a facility is "
+                        "Islamic this is the correct reference rather than MYOR."),
         "group": "Money market",
         "currency": "MYR",
         "market": "Malaysia",
@@ -73,6 +93,11 @@ CURVES = {
         "headline_tenors": ["1M", "3M", "6M"],
     },
     "MGS": {
+        "explainer": ("Malaysian Government Securities, the conventional MYR government bond. "
+                        "These are Bank Negara's daily benchmark closing yields for the current "
+                        "on-the-run bond at each tenor, and they serve as the risk-free curve for "
+                        "long-dated MYR pricing. Where BNM's own table stars a yield, no trade set "
+                        "that day's price."),
         "group": "Government",
         "currency": "MYR",
         "market": "Malaysia",
@@ -84,6 +109,10 @@ CURVES = {
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
     },
     "MGII": {
+        "explainer": ("Malaysian Government Investment Issues, the Shariah-compliant government "
+                        "issuance. This is the right benchmark for Sukuk and conventional MGS is "
+                        "not, even though in practice the two sit within a few basis points of each "
+                        "other and can cross either way."),
         "group": "Government",
         "currency": "MYR",
         "market": "Malaysia",
@@ -96,6 +125,11 @@ CURVES = {
         "url": "https://financialmarkets.bnm.gov.my/benchmark-yields",
     },
     "THOR": {
+        "explainer": ("Thailand's transaction-based reference rate, published by the Bank of "
+                        "Thailand with ThaiBMA as calculation agent. The overnight rate runs from "
+                        "2015. The 1M, 3M and 6M figures are compounded averages of overnight rates "
+                        "already fixed and begin on 2 April 2020, so like MYOR they look backward "
+                        "rather than forward."),
         "group": "Money market",
         "currency": "THB",
         "market": "Thailand",
@@ -109,6 +143,12 @@ CURVES = {
         "url": "https://app.bot.or.th/thor/en",
     },
     "SOFR": {
+        "explainer": ("The US secured overnight rate, based on overnight Treasury repo "
+                        "transactions and published by the New York Fed. The 30, 90 and 180 day "
+                        "figures are the Fed's compounded averages of overnight SOFR already fixed, "
+                        "so they also look backward. They are not CME Term SOFR, the "
+                        "forward-looking rate most USD facilities actually reference: that one is licensed "
+                        "and cannot be redistributed, so it is not carried here."),
         "group": "Money market",
         "currency": "USD",
         "market": "United States",

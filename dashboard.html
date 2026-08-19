@@ -145,6 +145,7 @@ button.primary { background: var(--series-1); color: #fff; border-color: transpa
 .card-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
 .swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; align-self: center; }
 .card h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.card h2.explains { cursor: help; border-bottom: 1px dotted var(--border); }
 .card .meta { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
 /* One block per headline tenor. A market often quotes several together, so
    they sit in a row and wrap when the column is narrow. */
@@ -217,6 +218,26 @@ tbody tr + tr td { border-top: 1px solid var(--grid); }
    USD SOFR and PHP BVAL is readable without flipping between two charts. */
 .compare { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 10px; }
 .compare label { font-size: 12px; color: var(--text-secondary); }
+
+/* ---- benchmark reference ---- */
+#about > summary { list-style: none; cursor: pointer; display: flex;
+                   align-items: center; gap: 8px; }
+#about > summary::-webkit-details-marker { display: none; }
+#about > summary h3 { margin: 0; }
+#about > summary::after { content: "be"; font-size: 11px; color: var(--text-muted);
+                          transition: transform .12s; }
+#about[open] > summary::after { transform: rotate(180deg); }
+#about .hint { margin-top: 10px; }
+.about-mkt { display: flex; align-items: center; gap: 9px; margin: 20px 0 10px;
+             padding-bottom: 8px; border-bottom: 1px solid var(--grid); }
+.about-mkt .flag { display: inline-flex; line-height: 0; border-radius: 3px;
+                   overflow: hidden; box-shadow: 0 0 0 1px var(--border); flex: none; }
+.about-mkt .name { font-size: 14px; font-weight: 650; }
+.about-item { margin: 0 0 14px; }
+.about-item h4 { font-size: 13px; font-weight: 650; margin: 0 0 2px; }
+.about-item .meta { font-size: 12px; color: var(--text-muted); margin: 0 0 4px; }
+.about-item p.body { font-size: 13px; margin: 0; color: var(--text-secondary);
+                     max-width: 78ch; line-height: 1.55; }
 .compare select { font-size: 12px; padding: 4px 8px; border-radius: 7px;
                   border: 1px solid var(--border); background: transparent;
                   color: inherit; max-width: 220px; }
@@ -304,6 +325,21 @@ svg { display: block; width: 100%; height: auto; overflow: visible; }
   <div class="legend" id="shapeLegend"></div>
 </section>
 
+<section class="panel">
+  <details id="about">
+    <summary><h3>What these benchmarks are</h3></summary>
+    <p class="hint" id="aboutLead">
+      <strong>Forward looking or backward looking is the distinction that matters
+      most here.</strong> KLIBOR and BVAL are quoted for the period ahead. The
+      MYOR, MYOR-i, THOR and SOFR term figures are compounded averages of
+      overnight rates that have already fixed, so they describe the period just
+      ended. Two rates of the same tenor are therefore not interchangeable, and
+      swapping one for the other in a facility changes what the margin has to
+      carry.</p>
+    <div id="aboutBody"></div>
+  </details>
+</section>
+
 <p class="note" id="footer"></p>
 </div>
 
@@ -347,6 +383,10 @@ function activeSeries() {
 }
 
 const $ = (id) => document.getElementById(id);
+/* Escapes for an HTML attribute. The explainers contain apostrophes and a
+   colon, and one wrong quote would silently truncate the tooltip. */
+const esc = (v) => String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+                            .replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const fmt = (v, d = 3) => v === null || v === undefined ? "–" : v.toFixed(d);
 const iso = (d) => d.toISOString().slice(0, 10);
 
@@ -479,7 +519,8 @@ function buildCard(m, i) {
   card.innerHTML = `
     <div class="card-head">
       <span class="swatch" style="background:var(${SERIES[i % MAX_SERIES]})"></span>
-      <h2>${m.label}</h2><span class="spacer"></span>${stale}
+      <h2 class="explains" title="${esc(m.explainer || m.description || "")}">${m.label}</h2>
+      <span class="spacer"></span>${stale}
     </div>
     <p class="meta">${m.rows.toLocaleString()} observations
        &middot; from ${m.first_date ? niceDate(m.first_date) : "–"}</p>
@@ -538,6 +579,36 @@ async function loadCardTable(m) {
        <table><thead><tr><th>Tenor</th><th>Rate&nbsp;%</th><th>Chg&nbsp;bp</th></tr></thead>
        <tbody>${body}</tbody></table>
      </details>`;
+}
+
+/* Grouped by market, same order as the cards, so the reference reads in the
+   same sequence as the page above it. */
+function renderAbout() {
+  const byCurve = {};
+  state.meta.forEach(m => { byCurve[m.curve] = m; });
+  const groups = (state.markets && state.markets.length)
+    ? state.markets
+    : [{ market: "", flag: "", curves: state.meta.map(m => m.curve) }];
+
+  $("aboutBody").innerHTML = groups.map(mkt => {
+    const head = mkt.market
+      ? `<div class="about-mkt"><span class="flag">${mkt.flag}</span>
+           <span class="name">${mkt.market}</span></div>`
+      : "";
+    const items = mkt.curves.map(curve => {
+      const m = byCurve[curve];
+      if (!m) return "";
+      const span = m.first_date
+        ? `${niceDate(m.first_date)} to ${niceDate(m.last_date)}`
+        : "no data yet";
+      return `<div class="about-item">
+                <h4>${m.label}</h4>
+                <p class="meta">${m.source} &middot; ${span}</p>
+                <p class="body">${m.explainer || m.description || ""}</p>
+              </div>`;
+    }).join("");
+    return head + items;
+  }).join("");
 }
 
 /* ---------------- controls ---------------- */
@@ -1047,6 +1118,7 @@ async function boot(keepSelection) {
   }
   renderCards();
   renderControls();
+  renderAbout();
   await Promise.all([loadSeries(), loadShape()]);
 
   $("footer").innerHTML =
