@@ -947,7 +947,27 @@ function attachShapeGuide(host, sets, labels, X, P, ih) {
       return `<div class="r"><i style="display:inline-block;width:10px;height:3px;border-radius:2px;
               background:${col}"></i>${name}<b>${p ? fmt(p.rate) + "%" : "–"}</b></div>`;
     }).join("");
-    tip.innerHTML = `<div class="d">${tenor}</div>${rows}`;
+
+    // The move between the two dates: the number the chart exists to show,
+    // which was previously left to be eyeballed off the gap between the lines.
+    // Latest minus earlier, so a rate that rose reads positive. Percentage
+    // points, because the difference between two percentages is not itself a
+    // percentage; basis points follow, as used on the rate cards.
+    let delta = "";
+    if (sets.length === 2) {
+      const a = sets[0][1].points.find(q => q.tenor === tenor);
+      const b = sets[1][1].points.find(q => q.tenor === tenor);
+      if (a && b) {
+        const d = a.rate - b.rate;
+        const cls = d > 0 ? "chg-rise" : d < 0 ? "chg-fall" : "chg-flat";
+        const sign = d > 0 ? "+" : "";
+        delta = `<div class="r" style="margin-top:5px;padding-top:5px;
+                   border-top:1px solid var(--grid)">Change
+                 <b class="${cls}">${sign}${d.toFixed(3)} pp
+                   (${sign}${(d * 100).toFixed(1)} bp)</b></div>`;
+      }
+    }
+    tip.innerHTML = `<div class="d">${tenor}</div>${rows}${delta}`;
     tip.classList.add("on");
     const tw = tip.offsetWidth, th = tip.offsetHeight;
     let lx = ev.clientX + 14, ly = ev.clientY - th / 2;

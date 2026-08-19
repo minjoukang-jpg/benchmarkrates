@@ -698,6 +698,23 @@ else:
         )
         shape_guide_frame = (frame.pivot(index="Tenor", columns="Curve", values="Rate")
                              .reindex(columns=shape_names).reset_index())
+
+        # The move between the two dates, which is the number the chart exists
+        # to show and was previously left to be eyeballed off the gap.
+        #
+        # Latest minus earlier, so a rate that rose reads positive. Stated in
+        # percentage points, because the difference between two percentages is
+        # not itself a percentage: 7.042 against 7.449 is 0.407pp, and calling
+        # that "0.407%" would invite reading it as a 0.4% relative move. Basis
+        # points follow in brackets, the market's own unit and the one the rate
+        # cards already use.
+        shape_delta = None
+        if len(shape_names) == 2:
+            newest, earlier = shape_names
+            shape_delta = shape_guide_frame[newest] - shape_guide_frame[earlier]
+            shape_guide_frame["Change"] = shape_delta.map(
+                lambda v: "–" if pd.isna(v) else f"{v:+.3f} pp ({v * 100:+.1f} bp)")
+
         for name in shape_names:
             shape_guide_frame[name] = shape_guide_frame[name].map(
                 lambda v: "–" if pd.isna(v) else f"{v:.3f}")
@@ -710,7 +727,9 @@ else:
                 opacity=alt.condition(shape_hover, alt.value(0.55), alt.value(0)),
                 tooltip=([alt.Tooltip(field="Tenor", type="nominal")]
                          + [alt.Tooltip(field=name, type="nominal", title=name)
-                            for name in shape_names]),
+                            for name in shape_names]
+                         + ([alt.Tooltip(field="Change", type="nominal")]
+                            if shape_delta is not None else [])),
             )
             .add_params(shape_hover)
         )
