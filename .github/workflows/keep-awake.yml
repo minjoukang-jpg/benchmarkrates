@@ -1,22 +1,29 @@
 name: Keep the app awake
 
-# Streamlit Community Cloud puts an app to sleep after roughly a week without
+# Streamlit Community Cloud puts an app to sleep after a spell without
 # visitors. This opens the app in a real headless browser so the visit counts.
 #
 # Why a browser and not curl: fetching the URL only returns Streamlit's static
-# React shell - the same bytes whether the app is running or asleep. The app
+# React shell, the same bytes whether the app is running or asleep. The app
 # itself only starts when a browser opens a websocket back to the server, so a
 # plain HTTP request almost certainly does not register as a viewer session.
 # Playwright loads the page properly and waits for that connection.
 #
-# Caveat worth keeping in mind: Streamlit does not document exactly what resets
-# the inactivity timer, so this is a well-founded approach rather than a
-# guarantee. If the app still sleeps, README.md lists the alternatives.
+# Streamlit does not document what resets the inactivity timer, so this is a
+# well-founded approach rather than a guarantee. The job records whether it
+# found the app already asleep, which is the evidence for whether it is
+# working: see "Reading the run history" below.
 on:
   schedule:
-    # Once a day, well away from the noon data run. The sleep threshold is about
-    # a week, so daily leaves a wide margin even if a run is skipped.
-    - cron: "0 22 * * *"
+    # Every two hours. A single daily visit was not enough to stop the app
+    # sleeping, so the interval is now well inside any plausible threshold
+    # rather than sized against an assumed one.
+    #
+    # Twelve runs a day is free: the repository is public, so GitHub does not
+    # meter Actions minutes on it. Scheduled runs are best-effort and GitHub
+    # drops some under load, which is a further reason not to rely on one a
+    # day; at this cadence several can be skipped and the app still gets seen.
+    - cron: "0 */2 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -29,13 +36,16 @@ permissions:
 jobs:
   visit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
       - name: Install a headless browser
-        run: npx --yes playwright@1.47.0 install --with-deps chromium
+        run: |
+          npm install --no-save playwright@1.47.0
+          npx playwright install --with-deps chromium
 
       - name: Open the app and hold a session
         env:
@@ -43,34 +53,80 @@ jobs:
         run: |
           cat > visit.mjs <<'EOF'
           import { chromium } from 'playwright';
+          import { appendFileSync } from 'node:fs';
 
           const url = process.env.APP_URL;
+          const note = (line) => {
+            console.log(line);
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + '\n');
+            }
+          };
+
           const browser = await chromium.launch();
           const page = await browser.newPage();
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
-          // If it had already fallen asleep, this button is the only way back.
+          // Whether it had already fallen asleep is the one number worth
+          // tracking. If these runs keep reporting "was asleep", two-hourly
+          // visits are not resetting the timer and the approach needs to
+          // change rather than just run more often.
           const wake = page.getByText(/get this app back up/i);
-          if (await wake.count()) {
-            console.log('App was asleep. Clicking the wake button.');
+          const wasAsleep = (await wake.count()) > 0;
+          if (wasAsleep) {
+            note('**Found the app ASLEEP.** Clicking the wake button.');
             await wake.first().click();
+          } else {
+            note('Found the app already awake.');
           }
 
-          // Wait for the app itself to render, not just the shell. The title is
-          // set by our own page, so seeing it proves the session really ran.
+          // Wait for the app itself to render, not just the shell. The heading
+          // comes from our own page, so seeing it proves the session really ran.
+          let rendered = true;
           try {
             await page.getByText('Benchmark Rates').first()
-                      .waitFor({ state: 'visible', timeout: 120000 });
-            console.log('App is awake and rendered.');
+                      .waitFor({ state: 'visible', timeout: 150000 });
+            note('App rendered.');
           } catch {
-            console.log('::warning::Did not see the app render within the timeout.');
-            console.log(await page.title());
+            rendered = false;
+            note('::warning::Did not see the app render within the timeout.');
+            note('Page title was: ' + (await page.title()));
           }
 
-          // Hold the websocket open briefly so the visit is unambiguous.
-          await page.waitForTimeout(15000);
+          // Hold the websocket open so the visit is unmistakable.
+          await page.waitForTimeout(30000);
+
+          // A second full load, deliberately rather than a click. Clicking a
+          // control would be stronger evidence of server work, but "3M" alone
+          // matches a range button, a tenor chip and an entry in the compare
+          // list, and picking the wrong one is a silent no-op that still
+          // reports success. A reload starts a fresh session and cannot
+          // mis-target anything.
+          if (rendered) {
+            try {
+              await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 });
+              await page.getByText('Benchmark Rates').first()
+                        .waitFor({ state: 'visible', timeout: 120000 });
+              note('Second session opened and rendered.');
+              await page.waitForTimeout(15000);
+            } catch {
+              note('Second load did not complete; the first session still counts.');
+            }
+          }
+
           await browser.close();
+
+          note(wasAsleep
+            ? 'Result: the app had gone to sleep between visits.'
+            : 'Result: the app stayed awake since the last visit.');
           EOF
 
-          npm install --no-save playwright@1.47.0
           node visit.mjs
+
+# Reading the run history
+# -----------------------
+# Each run writes one line to its summary saying whether the app was already
+# awake. If runs consistently say "stayed awake", this is doing its job. If
+# they keep saying "had gone to sleep", the visits are not resetting the timer
+# and running more often will not fix it; the answer then is a paid Streamlit
+# tier or hosting the app somewhere that does not sleep.
