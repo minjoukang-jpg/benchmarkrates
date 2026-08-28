@@ -554,6 +554,76 @@ class TestSofrOutcomeMerge(unittest.TestCase):
         self.assertTrue(out.degraded)
 
 
+class TestThorCurrentMonth(unittest.TestCase):
+    """BOT drops roughly half of these requests, returning the unfiltered page
+    instead of the report. Two things were wrong: nothing retried, and a failed
+    current month still reported success."""
+
+    def setUp(self):
+        self._real = sources.fetch_thor_month
+        self.calls = []
+
+    def tearDown(self):
+        sources.fetch_thor_month = self._real
+
+    def _stub(self, outcomes):
+        def fake(year, month):
+            self.calls.append((year, month))
+            return outcomes[len(self.calls) - 1]
+        sources.fetch_thor_month = fake
+
+    def test_a_failed_current_month_is_a_failure_not_a_success(self):
+        """The month in progress is the only one that can carry the curve
+        forward. Reporting OK because an earlier month re-parsed announces a
+        successful update while the data stands still. That is what left THOR
+        two days stale with every run showing green."""
+        self._stub([
+            sources.Outcome(sources.FAILED, [], None, "no date header"),
+            sources.Outcome(sources.OK, [("2026-07-31", "O/N", 0.98602)], "bot"),
+        ])
+        out = sources.fetch_thor_recent(datetime.date(2026, 8, 28))
+        self.assertTrue(out.failed, "a stale current month must not report OK")
+        self.assertEqual(out.rows, [], "stale rows must not be passed off as new")
+        self.assertIn("current month", out.detail)
+
+    def test_a_failed_earlier_month_is_tolerated(self):
+        """Only the current month matters for advancing. An older one failing
+        is worth noting but everything it holds is already stored."""
+        self._stub([
+            sources.Outcome(sources.OK, [("2026-08-28", "O/N", 0.977)], "bot"),
+            sources.Outcome(sources.FAILED, [], None, "no date header"),
+        ])
+        out = sources.fetch_thor_recent(datetime.date(2026, 8, 28))
+        self.assertTrue(out.ok)
+        self.assertEqual(len(out.rows), 1)
+        self.assertIn("earlier month", out.detail)
+
+    def test_an_empty_current_month_is_not_a_failure(self):
+        """On the first of a month, before anything has published, the current
+        month is legitimately empty. That is a quiet day, not a fault."""
+        self._stub([
+            sources.Outcome(sources.EMPTY, [], None, "no data published"),
+            sources.Outcome(sources.OK, [("2026-07-31", "O/N", 0.986)], "bot"),
+        ])
+        out = sources.fetch_thor_recent(datetime.date(2026, 8, 1))
+        self.assertTrue(out.ok)
+        self.assertFalse(out.failed)
+
+    def test_both_months_failing_is_a_failure(self):
+        self._stub([
+            sources.Outcome(sources.FAILED, [], None, "no date header"),
+            sources.Outcome(sources.FAILED, [], None, "no date header"),
+        ])
+        out = sources.fetch_thor_recent(datetime.date(2026, 8, 28))
+        self.assertTrue(out.failed)
+
+    def test_the_retry_schedule_is_declared_and_finite(self):
+        backoff = sources.BOT_THOR_RETRY_BACKOFF
+        self.assertGreaterEqual(len(backoff), 3, "one retry is not enough at a 50% drop rate")
+        self.assertEqual(backoff[-1], 0, "the last attempt must not sleep before giving up")
+        self.assertTrue(all(isinstance(p, int) and p >= 0 for p in backoff))
+
+
 class TestValidation(unittest.TestCase):
 
     def test_accepts_good_data(self):

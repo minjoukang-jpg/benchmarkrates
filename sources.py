@@ -1087,6 +1087,10 @@ def parse_bot_thor(html):
     return out
 
 
+# Waits between attempts, in seconds. The final 0 means "try, then give up".
+BOT_THOR_RETRY_BACKOFF = (2, 5, 10, 0)
+
+
 def fetch_thor_month(year, month):
     """THOR and its averages for one calendar month, from BOT."""
     def strategy():
@@ -1116,10 +1120,28 @@ def fetch_thor_month(year, month):
             raise FetchError("BOT rejected the THOR query with HTTP %d" % status)
         return parse_bot_thor(body), False
 
-    out = _try_strategies([("bot-fm-rt-013", strategy)])
-    if out.ok:
-        validate_rows("THOR", out.rows)
-    return out
+    # BOT drops roughly half of these requests, returning the unfiltered page
+    # instead of the report. Measured at 3 successes in 6 attempts, in no
+    # pattern, and a retry a second later clears it, so it reads as the server
+    # load-balancing away from the node that issued the viewstate rather than
+    # anything about the request. Each attempt re-fetches the form, so every
+    # retry carries a fresh viewstate. Four attempts take the residual failure
+    # rate from about one in two to roughly one in sixteen.
+    last = None
+    for attempt, pause in enumerate(BOT_THOR_RETRY_BACKOFF):
+        label = "bot-fm-rt-013" if not attempt else f"bot-fm-rt-013-retry{attempt}"
+        last = _try_strategies([(label, strategy)])
+        if last.ok:
+            validate_rows("THOR", last.rows)
+            if attempt:
+                last.detail = (f"succeeded on attempt {attempt + 1}; "
+                               "BOT dropped the earlier ones")
+            return last
+        if not last.failed:
+            return last                    # a genuinely empty month; do not retry
+        if pause:
+            time.sleep(pause)
+    return last
 
 
 def fetch_thor_recent(end=None, months=2):
@@ -1136,19 +1158,34 @@ def fetch_thor_recent(end=None, months=2):
         wanted.append((cursor.year, cursor.month))
         cursor = (cursor - datetime.timedelta(days=1)).replace(day=1)
 
-    rows, errors = [], []
-    for year, month in wanted:
+    rows, errors, current_failed = [], [], False
+    for index, (year, month) in enumerate(wanted):
         out = fetch_thor_month(year, month)
         if out.ok:
             rows.extend(out.rows)
         elif out.failed:
             errors.append("%04d-%02d: %s" % (year, month, out.detail))
+            # wanted[0] is the month in progress. An empty one is fine early in
+            # a month; a failed one is not.
+            current_failed = current_failed or index == 0
 
     if not rows:
         if errors:
             return Outcome(FAILED, [], None, "; ".join(errors))
         return Outcome(EMPTY, [], "bot-fm-rt-013", "no data in the last %d months" % months)
+
+    if current_failed:
+        # Only the month in progress can carry the curve forward. Reporting OK
+        # because a previous month re-parsed would announce a successful update
+        # while the data stood still, which is the precise failure this module
+        # exists to refuse. It cost two days of stale THOR before it was
+        # noticed, because the run said success.
+        return Outcome(FAILED, [], None,
+                       "the current month could not be read, so nothing new was "
+                       "available; earlier months re-parsed but only repeat data "
+                       "already stored. " + "; ".join(errors))
+
     detail = "%d month(s)" % len(wanted)
     if errors:
-        detail += "; %d failed (%s)" % (len(errors), errors[0])
+        detail += "; %d earlier month(s) failed (%s)" % (len(errors), errors[0])
     return Outcome(OK, rows, "bot-fm-rt-013", detail)
