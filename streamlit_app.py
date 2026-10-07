@@ -313,7 +313,11 @@ st.title("Benchmark Rates")
 _newest = max((m["last_date"] for m in meta if m["last_date"]), default=None)
 st.caption(f"PHP, MYR and USD base interest rates · {total:,} observations · "
            f"data to {nice_date(_newest) if _newest else 'no data'} · "
-           f"updated daily at noon Malaysia time")
+           # Not "noon Malaysia time", which is what the cron asks for and what
+           # this said for months. GitHub runs the job 5 to 7 hours after its
+           # slot every single day, and has never started it before 09:11 UTC,
+           # so the claim was wrong by about six hours for every reader.
+           f"updated daily, usually early evening Malaysia time")
 
 # -- health banners --------------------------------------------------------
 # Only a genuine failure is surfaced. A weekend or a public holiday logs
