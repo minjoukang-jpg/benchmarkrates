@@ -60,14 +60,35 @@ jobs:
         run: |
           git config user.name  "rates-bot"
           git config user.email "rates-bot@users.noreply.github.com"
+          # Re-point at whatever is on the remote now, keeping the CSVs this run
+          # just wrote. A re-run checks out the commit the run was triggered
+          # from, which by then is usually behind, and the first attempt may
+          # already have pushed some of today's rows.
+          #
+          # This replaced "git pull --rebase". Rebasing cannot work here: both
+          # the remote commit and this one insert a line at the top of the same
+          # CSVs, so it conflicts on every file and the step dies half way
+          # through a rebase. Reproduced, and it is what made the re-run of
+          # 2026-10-06 fail with a second, unrelated-looking error.
+          #
+          # There is nothing to merge in any case. export rewrites each CSV in
+          # full from the database, and the database was rebuilt from the
+          # committed CSVs at the start of this job, so what sits in the working
+          # tree already contains everything the remote has plus whatever today
+          # added.
+          #
+          # A mixed reset, not --soft: it moves the index to the remote tree as
+          # well, so only data/ is staged below. With --soft the index would
+          # keep this checkout's stale copies of every other file, and the
+          # commit would quietly revert any code pushed since the run started.
+          git fetch --quiet origin "${GITHUB_REF_NAME}"
+          git reset --quiet "origin/${GITHUB_REF_NAME}"
+
           git add data
           if git diff --staged --quiet; then
             echo "No new rates today (weekend, public holiday, or already current)."
           else
             git commit -m "Rates update $(date -u +%Y-%m-%d)"
-            # Another run or a manual edit may have landed first; rebase onto it
-            # rather than failing outright.
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
